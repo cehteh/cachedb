@@ -9,6 +9,7 @@ repository = "https://github.com/cehteh/cachedb.git"
 keywords = ["collection", "cache"]
 
 [dependencies]
+parking_lot = "0.11"
 
 [badges]
 maintenance = { status = "actively-developed" }
