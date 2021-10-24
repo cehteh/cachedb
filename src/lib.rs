@@ -65,6 +65,21 @@
 //! time per thread. When is impractical one need to carefully consider locking order or
 //! employ other tactics to counter deadlocks.
 //!
+//!
+//! TESTS
+//! =====
+//!
+//! The 'test::multithreaded_stress' test can be controlled by environment variables
+//!
+//!  * 'STRESS_THREADS' sets the number of threads to spawn.  Defaults to 10.
+//!  * 'STRESS_WAIT' threads randomly wait up to this much milliseconds to fake some work.  Defaults to 5.
+//!  * 'STRESS_ITERATIONS' how many iterations each thread shall do.  Defaults to 100.
+//!  * 'STRESS_RANGE' how many unique keys the test uses.  Defaults to 1000.
+//!
+//! The default values are rather small to make the test suite complete fast. For dedicated
+//! stress testing at least STRESS_ITERATIONS and STRESS_THREADS has to be incresed significantly.
+//!
+//!
 //! ISSUES
 //! ======
 //!
@@ -185,9 +200,9 @@ where
     }
 
     /// Query an Entry for reading or construct it (atomically)
-    pub fn get_or<'a, F>(&'a self, key: K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
+    pub fn get_or<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
     where
-        F: FnOnce() -> Result<V>,
+        F: FnOnce(&K) -> Result<V>,
     {
         let mut bucket = self.buckets[key.bucket::<N>()].lock();
 
@@ -304,28 +319,122 @@ pub trait Bucketize: Hash {
 #[cfg(test)]
 mod test {
     use crate::*;
+    use parking_lot::Once;
+    use rand::Rng;
+    use std::env;
+    use std::{thread, time};
+
+    static INIT: Once = Once::new();
+
+    fn init() {
+        INIT.call_once(|| simple_logger::init_with_env().unwrap());
+    }
 
     // using the default hash based implementation for tests here
     impl Bucketize for String {}
+    impl Bucketize for u16 {
+        fn bucket<const N: usize>(&self) -> usize {
+            let r = *self as usize % N;
+            trace!("key {} falls into bucket {}", self, r);
+            r
+        }
+    }
 
     #[test]
     fn create() {
+        init();
         let cdb = CacheDb::<String, String, 16>::new();
 
         assert!(cdb.get(&"foo".to_string()).is_none());
+    }
+
+    #[test]
+    fn insert_foobar() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
         assert!(cdb
-            .get_or("foo".to_string(), || Ok("bar".to_string()))
+            .get_or(&"foo".to_string(), |_| Ok("bar".to_string()))
             .is_ok());
         assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
     }
 
     #[test]
-    fn insert_foobar() {
-        let cdb = CacheDb::<String, String, 16>::new();
+    pub fn multithreaded_stress() {
+        init();
+        let cdb = CacheDb::<u16, u16, 64>::new();
+        let mut rng = rand::thread_rng();
 
-        assert!(cdb
-            .get_or("foo".to_string(), || Ok("bar".to_string()))
-            .is_ok());
-        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
+        let num_threads: u16 = env::var("STRESS_THREADS")
+            .unwrap_or("10".to_string())
+            .parse()
+            .unwrap();
+        let wait_millis: u64 = env::var("STRESS_WAIT")
+            .unwrap_or("5".to_string())
+            .parse()
+            .unwrap();
+        let iterations: u64 = env::var("STRESS_ITERATIONS")
+            .unwrap_or("100".to_string())
+            .parse()
+            .unwrap();
+        let range: u16 = env::var("STRESS_RANGE")
+            .unwrap_or("1000".to_string())
+            .parse()
+            .unwrap();
+
+        // The per thread function
+
+        let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, 64>>::new();
+
+        for _ in 1..iterations {
+            // r is the key we handle
+            let r = rng.gen_range(0..range);
+            // p is the probability of some operation
+            let p = rng.gen_range(1..100);
+            // w is the wait time to simulate thread work
+            let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
+
+            match locked.remove(&r) {
+                // thread had no lock stored, create a new entry
+                None => {
+                    // TODO: chance for touch
+                    if p <= 15 {
+                        // TODO: remove
+                    } else if p <= 30 {
+                        // TODO: touch
+                    } else if p <= 50 {
+                        trace!("get_or {} and keep it", r);
+                        locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
+                    } else if p <= 55 {
+                        // TODO: get_mut_or work
+                    } else if p <= 60 {
+                        // TODO: work get_mut_or
+                    } else if p <= 80 {
+                        trace!("get_or {} and then wait/work for {:?}", r, w);
+                        let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                        thread::sleep(w);
+                    } else {
+                        trace!("wait/work for {:?} and then get_or {}", w, r);
+                        thread::sleep(w);
+                        let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                    }
+                }
+
+                // locked already for reading, lets drop it
+                Some(read_guard) => {
+                    if p <= 95 {
+                        trace!("unlock kept readguard {}", r);
+                        drop(read_guard);
+                    } else {
+                        // TODO: drop-remove
+                    }
+                }
+            };
+        }
+
+        drop(locked);
+
+        // after all threads joined
+        // TODO: finally assert that nothing is locked
     }
 }

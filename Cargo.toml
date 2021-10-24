@@ -13,6 +13,7 @@ parking_lot = "0.11"
 log = "0.4"
 
 [dev-dependencies]
+rand = "0.8.4"
 simple_logger = "1.13.0"
 
 [badges]
