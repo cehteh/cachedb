@@ -60,6 +60,10 @@
 //! the element may be removed from it (when it was not in use). Once done with the LRU list
 //! its lock is released.
 //!
+//! It is worth to mention that code using the cachedb can still deadlock when it acquires
+//! locks in ill order. The simplest advise is to have only one single exclusive lock at all
+//! time per thread. When is impractical one need to carefully consider locking order or
+//! employ other tactics to counter deadlocks.
 //!
 //! ISSUES
 //! ======
