@@ -10,6 +10,10 @@ keywords = ["collection", "cache"]
 
 [dependencies]
 parking_lot = "0.11"
+log = "0.4"
+
+[dev-dependencies]
+simple_logger = "1.13.0"
 
 [badges]
 maintenance = { status = "actively-developed" }

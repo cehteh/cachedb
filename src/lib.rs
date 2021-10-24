@@ -76,12 +76,17 @@
 //!
 
 use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::mem::forget;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::marker::PhantomPinned;
+
+#[allow(unused_imports)]
+pub use log::{debug, error, info, trace, warn};
 
 use intrusive_collections::linked_list::{Link, LinkedList};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -98,24 +103,30 @@ pub fn type_name<T>(_: &T) -> &str {
 /// generous large enough number here.  Think about expected number of concurrenct accesses
 /// times four.
 #[derive(Debug)]
-pub struct CacheDb<K: Eq + Bucketize, V, const N: usize> {
+pub struct CacheDb<K, V, const N: usize>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     buckets: [Bucket<K, V>; N],
 }
 
 /// The internal representation of a Bucket.
 #[derive(Debug)]
-struct Bucket<K: Eq + Bucketize, V> {
-    map: Mutex<HashMap<K, Box<Entry<V>>>>,
+struct Bucket<K: Eq + Bucketize + Debug, V> {
+    map: Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
 }
 
-impl<K: Eq + Bucketize, V> Bucket<K, V> {
+impl<K, V> Bucket<K, V>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
         }
     }
 
-    fn lock(&self) -> MutexGuard<HashMap<K, Box<Entry<V>>>> {
+    fn lock(&self) -> MutexGuard<HashMap<K, Pin<Box<Entry<V>>>>> {
         self.map.lock()
     }
 }
@@ -128,17 +139,22 @@ struct Entry<V> {
     // PLANNED: implement atomic lock transititon between two locks (as is, waiting on the rwlock will block the hashmap)
     // The Option is only used for delaying the construction.
     data: RwLock<Option<V>>,
+    _pin: PhantomPinned,
 }
 
 impl<V> Default for Entry<V> {
     fn default() -> Self {
         Entry {
             data: RwLock::new(None),
+    _pin: PhantomPinned,
         }
     }
 }
 
-impl<K: Eq + Bucketize, V, const N: usize> CacheDb<K, V, N> {
+impl<K, V, const N: usize> CacheDb<K, V, N>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     /// Create a new CacheDb
     pub fn new() -> CacheDb<K, V, N> {
         CacheDb {
@@ -159,6 +175,7 @@ impl<K: Eq + Bucketize, V, const N: usize> CacheDb<K, V, N> {
             .get(key)
             .map(|entry| {
                 let entry_ptr: *const Entry<V> = &**entry;
+                trace!("read lock: {:?}", key);
                 EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -178,6 +195,7 @@ impl<K: Eq + Bucketize, V, const N: usize> CacheDb<K, V, N> {
             Some(entry) => {
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<V> = &**entry;
+                trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -187,16 +205,17 @@ impl<K: Eq + Bucketize, V, const N: usize> CacheDb<K, V, N> {
             None => {
                 // Entry does not exist, we create an empty (data == None) entry and holding a
                 // write lock on it
-                let new_entry = Box::new(Entry::default());
+                let new_entry = Box::pin(Entry::default());
                 let entry_ptr: *const Entry<V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).data.write() };
                 // insert the entry into the bucket
-                bucket.insert(key, new_entry);
+                trace!("create for reading: {:?}", &key);
+                bucket.insert(key.clone(), new_entry);
                 // release the bucket lock, we dont need it anymore
                 drop(bucket);
 
                 // but we have wguard here which allows us to constuct the inner guts
-                *wguard = Some(ctor()?);
+                *wguard = Some(ctor(key)?);
 
                 // Finally downgrade the lock to a readlock and return the Entry
                 Ok(EntryReadGuard {
@@ -211,19 +230,28 @@ impl<K: Eq + Bucketize, V, const N: usize> CacheDb<K, V, N> {
 
 /// RAII Guard for the read lock. Manages to put unused entries into the LRU list.
 #[derive(Debug)]
-pub struct EntryReadGuard<'a, K: Eq + Bucketize, V, const N: usize> {
+pub struct EntryReadGuard<'a, K, V, const N: usize>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     cachedb: &'a CacheDb<K, V, N>,
     entry: &'a Entry<V>,
     guard: RwLockReadGuard<'a, Option<V>>,
 }
 
-impl<'a, K: Eq + Bucketize, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N> {
+impl<'a, K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     fn drop(&mut self) {
-        eprintln!("dropping");
+        trace!("dropping lock");
     }
 }
 
-impl<'a, K: Eq + Bucketize, V, const N: usize> Deref for EntryReadGuard<'_, K, V, N> {
+impl<'a, K, V, const N: usize> Deref for EntryReadGuard<'_, K, V, N>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     type Target = V;
     fn deref(&self) -> &Self::Target {
         // unwrap is safe, the option is only None for a short time while constructing a new value
@@ -233,18 +261,27 @@ impl<'a, K: Eq + Bucketize, V, const N: usize> Deref for EntryReadGuard<'_, K, V
 
 /// RAII Guard for the write lock. Manages to put unused entries into the LRU list.
 #[derive(Debug)]
-pub struct EntryWriteGuard<'a, K: Eq + Bucketize, V, const N: usize> {
+pub struct EntryWriteGuard<'a, K, V, const N: usize>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     cachedb: &'a CacheDb<K, V, N>,
     guard: RwLockWriteGuard<'a, V>,
 }
 
-impl<'a, K: Eq + Bucketize, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N> {
+impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     fn drop(&mut self) {
-        eprintln!("dropping");
+        trace!("dropping lock");
     }
 }
 
-impl<'a, K: Eq + Bucketize, V, const N: usize> Deref for EntryWriteGuard<'_, K, V, N> {
+impl<'a, K, V, const N: usize> Deref for EntryWriteGuard<'_, K, V, N>
+where
+    K: Eq + Clone + Bucketize + Debug,
+{
     type Target = V;
     fn deref(&self) -> &Self::Target {
         &(*self.guard)
