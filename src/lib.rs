@@ -322,6 +322,7 @@ mod test {
     use parking_lot::Once;
     use rand::Rng;
     use std::env;
+    use std::sync::{Arc, Barrier};
     use std::{thread, time};
 
     static INIT: Once = Once::new();
@@ -362,10 +363,9 @@ mod test {
     #[test]
     pub fn multithreaded_stress() {
         init();
-        let cdb = CacheDb::<u16, u16, 64>::new();
-        let mut rng = rand::thread_rng();
+        let cdb = Arc::new(CacheDb::<u16, u16, 64>::new());
 
-        let num_threads: u16 = env::var("STRESS_THREADS")
+        let num_threads: usize = env::var("STRESS_THREADS")
             .unwrap_or("10".to_string())
             .parse()
             .unwrap();
@@ -382,59 +382,75 @@ mod test {
             .parse()
             .unwrap();
 
-        // The per thread function
+        let mut handles = Vec::with_capacity(num_threads);
+        let barrier = Arc::new(Barrier::new(num_threads));
+        for _ in 0..num_threads {
+            let c = Arc::clone(&barrier);
+            let cdb = Arc::clone(&cdb);
 
-        let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, 64>>::new();
+            handles.push(thread::spawn(
+                // The per thread function
+                move || {
+                    let mut rng = rand::thread_rng();
+                    c.wait();
 
-        for _ in 1..iterations {
-            // r is the key we handle
-            let r = rng.gen_range(0..range);
-            // p is the probability of some operation
-            let p = rng.gen_range(1..100);
-            // w is the wait time to simulate thread work
-            let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
+                    let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, 64>>::new();
 
-            match locked.remove(&r) {
-                // thread had no lock stored, create a new entry
-                None => {
-                    // TODO: chance for touch
-                    if p <= 15 {
-                        // TODO: remove
-                    } else if p <= 30 {
-                        // TODO: touch
-                    } else if p <= 50 {
-                        trace!("get_or {} and keep it", r);
-                        locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
-                    } else if p <= 55 {
-                        // TODO: get_mut_or work
-                    } else if p <= 60 {
-                        // TODO: work get_mut_or
-                    } else if p <= 80 {
-                        trace!("get_or {} and then wait/work for {:?}", r, w);
-                        let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
-                        thread::sleep(w);
-                    } else {
-                        trace!("wait/work for {:?} and then get_or {}", w, r);
-                        thread::sleep(w);
-                        let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                    for _ in 1..iterations {
+                        // r is the key we handle
+                        let r = rng.gen_range(0..range);
+                        // p is the probability of some operation
+                        let p = rng.gen_range(1..100);
+                        // w is the wait time to simulate thread work
+                        let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
+
+                        match locked.remove(&r) {
+                            // thread had no lock stored, create a new entry
+                            None => {
+                                if p <= 15 {
+                                    // TODO: remove
+                                } else if p <= 30 {
+                                    // TODO: touch
+                                } else if p <= 50 {
+                                    trace!("get_or {} and keep it", r);
+                                    locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
+                                } else if p <= 55 {
+                                    // TODO: get_mut_or work
+                                } else if p <= 60 {
+                                    // TODO: work get_mut_or
+                                } else if p <= 80 {
+                                    trace!("get_or {} and then wait/work for {:?}", r, w);
+                                    let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                                    thread::sleep(w);
+                                    drop(lock);
+                                } else {
+                                    trace!("wait/work for {:?} and then get_or {}", w, r);
+                                    thread::sleep(w);
+                                    let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                                    drop(lock);
+                                }
+                            }
+
+                            // locked already for reading, lets drop it
+                            Some(read_guard) => {
+                                if p <= 95 {
+                                    trace!("unlock kept readguard {}", r);
+                                    drop(read_guard);
+                                } else {
+                                    // TODO: drop-remove
+                                }
+                            }
+                        };
                     }
-                }
-
-                // locked already for reading, lets drop it
-                Some(read_guard) => {
-                    if p <= 95 {
-                        trace!("unlock kept readguard {}", r);
-                        drop(read_guard);
-                    } else {
-                        // TODO: drop-remove
-                    }
-                }
-            };
+                    drop(locked);
+                },
+            ));
         }
 
-        drop(locked);
-
-        // after all threads joined
         // TODO: finally assert that nothing is locked
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }
