@@ -86,24 +86,21 @@
 //! * Until a full lock_transpose() which transfers locks automically becomes implemented,
 //!   waiting for a lock will block the whole bucket. This can be mitigated by finer grained
 //!   locking but a definitive solution would be the lock transfer. The workaround is not
-//!   palnned to be implemented yet.
+//!   planned to be implemented yet.
 //! * LRU list is not implemented yet
 //!
-
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use std::mem::forget;
+use std::marker::PhantomPinned;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::marker::PhantomPinned;
+//use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
-use intrusive_collections::linked_list::{Link, LinkedList};
+//use intrusive_collections::linked_list::{Link, LinkedList};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -161,7 +158,7 @@ impl<V> Default for Entry<V> {
     fn default() -> Self {
         Entry {
             data: RwLock::new(None),
-    _pin: PhantomPinned,
+            _pin: PhantomPinned,
         }
     }
 }
@@ -199,6 +196,9 @@ where
             })
     }
 
+    // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
+    //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
+    //       real ctor then.
     /// Query an Entry for reading or construct it (atomically)
     pub fn get_or<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
     where
