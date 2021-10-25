@@ -187,7 +187,7 @@ where
             .get(key)
             .map(|entry| {
                 let entry_ptr: *const Entry<V> = &**entry;
-                trace!("read lock: {:?}", key);
+                #[cfg(feature = "logging")] trace!("read lock: {:?}", key);
                 EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -210,7 +210,7 @@ where
             Some(entry) => {
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<V> = &**entry;
-                trace!("read lock (existing): {:?}", key);
+                #[cfg(feature = "logging")] trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -224,7 +224,7 @@ where
                 let entry_ptr: *const Entry<V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).data.write() };
                 // insert the entry into the bucket
-                trace!("create for reading: {:?}", &key);
+                #[cfg(feature = "logging")] trace!("create for reading: {:?}", &key);
                 bucket.insert(key.clone(), new_entry);
                 // release the bucket lock, we dont need it anymore
                 drop(bucket);
@@ -259,7 +259,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     fn drop(&mut self) {
-        trace!("dropping lock");
+        #[cfg(feature = "logging")] trace!("dropping lock");
     }
 }
 
@@ -289,7 +289,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     fn drop(&mut self) {
-        trace!("dropping lock");
+        #[cfg(feature = "logging")] trace!("dropping lock");
     }
 }
 
@@ -328,7 +328,8 @@ mod test {
     static INIT: Once = Once::new();
 
     fn init() {
-        INIT.call_once(|| simple_logger::init_with_env().unwrap());
+        #[cfg(feature = "logging")]
+        INIT.call_once(|| env_logger::init());
     }
 
     // using the default hash based implementation for tests here
@@ -336,7 +337,7 @@ mod test {
     impl Bucketize for u16 {
         fn bucket<const N: usize>(&self) -> usize {
             let r = *self as usize % N;
-            trace!("key {} falls into bucket {}", self, r);
+            #[cfg(feature = "logging")] trace!("key {} falls into bucket {}", self, r);
             r
         }
     }
@@ -412,19 +413,19 @@ mod test {
                                 } else if p <= 30 {
                                     // TODO: touch
                                 } else if p <= 50 {
-                                    trace!("get_or {} and keep it", r);
+                                    #[cfg(feature = "logging")] trace!("get_or {} and keep it", r);
                                     locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
                                 } else if p <= 55 {
                                     // TODO: get_mut_or work
                                 } else if p <= 60 {
                                     // TODO: work get_mut_or
                                 } else if p <= 80 {
-                                    trace!("get_or {} and then wait/work for {:?}", r, w);
+                                    #[cfg(feature = "logging")] trace!("get_or {} and then wait/work for {:?}", r, w);
                                     let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
                                     thread::sleep(w);
                                     drop(lock);
                                 } else {
-                                    trace!("wait/work for {:?} and then get_or {}", w, r);
+                                    #[cfg(feature = "logging")] trace!("wait/work for {:?} and then get_or {}", w, r);
                                     thread::sleep(w);
                                     let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
                                     drop(lock);
@@ -434,7 +435,7 @@ mod test {
                             // locked already for reading, lets drop it
                             Some(read_guard) => {
                                 if p <= 95 {
-                                    trace!("unlock kept readguard {}", r);
+                                    #[cfg(feature = "logging")] trace!("unlock kept readguard {}", r);
                                     drop(read_guard);
                                 } else {
                                     // TODO: drop-remove
