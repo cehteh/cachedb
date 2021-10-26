@@ -89,19 +89,21 @@
 //!   planned to be implemented yet.
 //! * LRU list is not implemented yet
 //!
-use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomPinned;
-use std::ops::Deref;
-use std::pin::Pin;
-//use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod entry;
+use crate::entry::Entry;
+pub use crate::entry::{EntryReadGuard, EntryWriteGuard};
+
+mod bucket;
+use crate::bucket::Bucket;
+pub use crate::bucket::Bucketize;
 
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
 //use intrusive_collections::linked_list::{Link, LinkedList};
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::RwLockWriteGuard;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn type_name<T>(_: &T) -> &str {
@@ -120,47 +122,6 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     buckets: [Bucket<K, V>; N],
-}
-
-/// The internal representation of a Bucket.
-#[derive(Debug)]
-struct Bucket<K: Eq + Bucketize + Debug, V> {
-    map: Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
-}
-
-impl<K, V> Bucket<K, V>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    fn new() -> Self {
-        Self {
-            map: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<HashMap<K, Pin<Box<Entry<V>>>>> {
-        self.map.lock()
-    }
-}
-
-/// User data is stored behind RwLocks in an entry. Furthermore some management information
-/// like the LRU list node are stored here. Entries have stable addresses and can't be moved
-/// in memory.
-#[derive(Debug)]
-struct Entry<V> {
-    // PLANNED: implement atomic lock transititon between two locks (as is, waiting on the rwlock will block the hashmap)
-    // The Option is only used for delaying the construction.
-    data: RwLock<Option<V>>,
-    _pin: PhantomPinned,
-}
-
-impl<V> Default for Entry<V> {
-    fn default() -> Self {
-        Entry {
-            data: RwLock::new(None),
-            _pin: PhantomPinned,
-        }
-    }
 }
 
 impl<K, V, const N: usize> CacheDb<K, V, N>
@@ -187,7 +148,8 @@ where
             .get(key)
             .map(|entry| {
                 let entry_ptr: *const Entry<V> = &**entry;
-                #[cfg(feature = "logging")] trace!("read lock: {:?}", key);
+                #[cfg(feature = "logging")]
+                trace!("read lock: {:?}", key);
                 EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -206,11 +168,12 @@ where
     {
         let mut bucket = self.buckets[key.bucket::<N>()].lock();
 
-        match bucket.get(&key) {
+        match bucket.get(key) {
             Some(entry) => {
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<V> = &**entry;
-                #[cfg(feature = "logging")] trace!("read lock (existing): {:?}", key);
+                #[cfg(feature = "logging")]
+                trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     cachedb: self,
                     entry: unsafe { &*entry_ptr },
@@ -224,7 +187,8 @@ where
                 let entry_ptr: *const Entry<V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).data.write() };
                 // insert the entry into the bucket
-                #[cfg(feature = "logging")] trace!("create for reading: {:?}", &key);
+                #[cfg(feature = "logging")]
+                trace!("create for reading: {:?}", &key);
                 bucket.insert(key.clone(), new_entry);
                 // release the bucket lock, we dont need it anymore
                 drop(bucket);
@@ -243,88 +207,27 @@ where
     }
 }
 
-/// RAII Guard for the read lock. Manages to put unused entries into the LRU list.
-#[derive(Debug)]
-pub struct EntryReadGuard<'a, K, V, const N: usize>
+impl<K, V, const N: usize> Default for CacheDb<K, V, N>
 where
     K: Eq + Clone + Bucketize + Debug,
 {
-    cachedb: &'a CacheDb<K, V, N>,
-    entry: &'a Entry<V>,
-    guard: RwLockReadGuard<'a, Option<V>>,
-}
-
-impl<'a, K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    fn drop(&mut self) {
-        #[cfg(feature = "logging")] trace!("dropping lock");
-    }
-}
-
-impl<'a, K, V, const N: usize> Deref for EntryReadGuard<'_, K, V, N>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    type Target = V;
-    fn deref(&self) -> &Self::Target {
-        // unwrap is safe, the option is only None for a short time while constructing a new value
-        &(*self.guard).as_ref().unwrap()
-    }
-}
-
-/// RAII Guard for the write lock. Manages to put unused entries into the LRU list.
-#[derive(Debug)]
-pub struct EntryWriteGuard<'a, K, V, const N: usize>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    cachedb: &'a CacheDb<K, V, N>,
-    guard: RwLockWriteGuard<'a, V>,
-}
-
-impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    fn drop(&mut self) {
-        #[cfg(feature = "logging")] trace!("dropping lock");
-    }
-}
-
-impl<'a, K, V, const N: usize> Deref for EntryWriteGuard<'_, K, V, N>
-where
-    K: Eq + Clone + Bucketize + Debug,
-{
-    type Target = V;
-    fn deref(&self) -> &Self::Target {
-        &(*self.guard)
-    }
-}
-
-/// Defines into which bucket a key falls. The default implementation uses the Hash trait for
-/// this. Custom implementations can override this to something more simple. It is recommended
-/// to implement this because very good distribution of the resulting value is not as
-/// important as for the hashmap.
-pub trait Bucketize: Hash {
-    // Must return an value 0..N-1 otherwise CacheDb will panic with array access out of bounds.
-    fn bucket<const N: usize>(&self) -> usize {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish() as usize % N
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::*;
+    #[cfg(feature = "logging")]
     use parking_lot::Once;
     use rand::Rng;
+    use std::collections::HashMap;
     use std::env;
     use std::sync::{Arc, Barrier};
     use std::{thread, time};
 
+    #[cfg(feature = "logging")]
     static INIT: Once = Once::new();
 
     fn init() {
@@ -337,7 +240,8 @@ mod test {
     impl Bucketize for u16 {
         fn bucket<const N: usize>(&self) -> usize {
             let r = *self as usize % N;
-            #[cfg(feature = "logging")] trace!("key {} falls into bucket {}", self, r);
+            #[cfg(feature = "logging")]
+            trace!("key {} falls into bucket {}", self, r);
             r
         }
     }
@@ -413,19 +317,22 @@ mod test {
                                 } else if p <= 30 {
                                     // TODO: touch
                                 } else if p <= 50 {
-                                    #[cfg(feature = "logging")] trace!("get_or {} and keep it", r);
+                                    #[cfg(feature = "logging")]
+                                    trace!("get_or {} and keep it", r);
                                     locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
                                 } else if p <= 55 {
                                     // TODO: get_mut_or work
                                 } else if p <= 60 {
                                     // TODO: work get_mut_or
                                 } else if p <= 80 {
-                                    #[cfg(feature = "logging")] trace!("get_or {} and then wait/work for {:?}", r, w);
+                                    #[cfg(feature = "logging")]
+                                    trace!("get_or {} and then wait/work for {:?}", r, w);
                                     let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
                                     thread::sleep(w);
                                     drop(lock);
                                 } else {
-                                    #[cfg(feature = "logging")] trace!("wait/work for {:?} and then get_or {}", w, r);
+                                    #[cfg(feature = "logging")]
+                                    trace!("wait/work for {:?} and then get_or {}", w, r);
                                     thread::sleep(w);
                                     let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
                                     drop(lock);
@@ -435,7 +342,8 @@ mod test {
                             // locked already for reading, lets drop it
                             Some(read_guard) => {
                                 if p <= 95 {
-                                    #[cfg(feature = "logging")] trace!("unlock kept readguard {}", r);
+                                    #[cfg(feature = "logging")]
+                                    trace!("unlock kept readguard {}", r);
                                     drop(read_guard);
                                 } else {
                                     // TODO: drop-remove
