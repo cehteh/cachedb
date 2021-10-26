@@ -102,6 +102,8 @@ pub use crate::bucket::Bucketize;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
+use intrusive_collections::UnsafeRef;
+
 //use intrusive_collections::linked_list::{Link, LinkedList};
 use parking_lot::RwLockWriteGuard;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -144,7 +146,7 @@ where
     /// Query the Entry associated with key for reading
     pub fn get<'a>(&'a self, key: &K) -> Option<EntryReadGuard<K, V, N>> {
         self.buckets[key.bucket::<N>()]
-            .lock()
+            .lock_map()
             .get(key)
             .map(|entry| {
                 let entry_ptr: *const Entry<V> = &**entry;
@@ -152,7 +154,7 @@ where
                 trace!("read lock: {:?}", key);
                 EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { &*entry_ptr },
+                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
                     guard: unsafe { (*entry_ptr).data.read() },
                 }
             })
@@ -166,9 +168,10 @@ where
     where
         F: FnOnce(&K) -> Result<V>,
     {
-        let mut bucket = self.buckets[key.bucket::<N>()].lock();
+        let bucket = &self.buckets[key.bucket::<N>()];
+        let mut map_lock = bucket.lock_map();
 
-        match bucket.get(key) {
+        match map_lock.get(key) {
             Some(entry) => {
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<V> = &**entry;
@@ -176,7 +179,7 @@ where
                 trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { &*entry_ptr },
+                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
                     guard: unsafe { (*entry_ptr).data.read() },
                 })
             }
@@ -189,7 +192,7 @@ where
                 // insert the entry into the bucket
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
-                bucket.insert(key.clone(), new_entry);
+                map_lock.insert(key.clone(), new_entry);
                 // release the bucket lock, we dont need it anymore
                 drop(bucket);
 
@@ -199,7 +202,7 @@ where
                 // Finally downgrade the lock to a readlock and return the Entry
                 Ok(EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { &*entry_ptr },
+                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
                     guard: RwLockWriteGuard::downgrade(wguard),
                 })
             }

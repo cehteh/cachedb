@@ -4,6 +4,7 @@ use std::marker::PhantomPinned;
 use std::ops::Deref;
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use intrusive_collections::{LinkedListLink, intrusive_adapter, UnsafeRef};
 
 use crate::{Bucketize, CacheDb};
 
@@ -15,13 +16,17 @@ pub(crate) struct Entry<V> {
     // PLANNED: implement atomic lock transititon between two locks (as is, waiting on the rwlock will block the hashmap)
     // The Option is only used for delaying the construction.
     pub(crate) data: RwLock<Option<V>>,
+    lru_link: LinkedListLink, // protected by lru_list mutex
     _pin: PhantomPinned,
 }
+
+intrusive_adapter!(pub(crate) EntryAdapter<V> = UnsafeRef<Entry<V>>: Entry<V> { lru_link: LinkedListLink });
 
 impl<V> Default for Entry<V> {
     fn default() -> Self {
         Entry {
             data: RwLock::new(None),
+            lru_link: LinkedListLink::new(),
             _pin: PhantomPinned,
         }
     }
@@ -34,7 +39,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     pub(crate) cachedb: &'a CacheDb<K, V, N>,
-    pub(crate) entry: &'a Entry<V>,
+    pub(crate) entry: UnsafeRef<Entry<V>>,
     pub(crate) guard: RwLockReadGuard<'a, Option<V>>,
 }
 

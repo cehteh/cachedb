@@ -3,7 +3,10 @@ use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 
+use intrusive_collections::LinkedList;
+
 use crate::Entry;
+use crate::entry::EntryAdapter;
 
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
@@ -14,6 +17,7 @@ use parking_lot::{Mutex, MutexGuard};
 #[derive(Debug)]
 pub(crate) struct Bucket<K: Eq + Bucketize + Debug, V> {
     map: Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
+    lru_list: Mutex<LinkedList<EntryAdapter<V>>>,
 }
 
 impl<K, V> Bucket<K, V>
@@ -23,11 +27,16 @@ where
     pub(crate) fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
+            lru_list: Mutex::new(LinkedList::new(EntryAdapter::new())),
         }
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<HashMap<K, Pin<Box<Entry<V>>>>> {
+    pub(crate) fn lock_map(&self) -> MutexGuard<HashMap<K, Pin<Box<Entry<V>>>>> {
         self.map.lock()
+    }
+
+    pub(crate) fn lock_lru(&self) -> MutexGuard<LinkedList<EntryAdapter<V>>> {
+        self.lru_list.lock()
     }
 }
 
