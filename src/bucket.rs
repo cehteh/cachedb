@@ -4,19 +4,17 @@ use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 
 use intrusive_collections::LinkedList;
-
-use crate::Entry;
-use crate::entry::EntryAdapter;
-
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
-
 use parking_lot::{Mutex, MutexGuard};
+
+use crate::entry::EntryAdapter;
+use crate::Entry;
 
 /// The internal representation of a Bucket.
 #[derive(Debug)]
 pub(crate) struct Bucket<K: Eq + Bucketize + Debug, V> {
-    map: Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
+    map:      Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
     lru_list: Mutex<LinkedList<EntryAdapter<V>>>,
 }
 
@@ -26,7 +24,7 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            map: Mutex::new(HashMap::new()),
+            map:      Mutex::new(HashMap::new()),
             lru_list: Mutex::new(LinkedList::new(EntryAdapter::new())),
         }
     }

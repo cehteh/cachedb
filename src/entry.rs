@@ -1,10 +1,10 @@
-//use std::sync::atomic::{AtomicUsize, Ordering};
+// use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fmt::Debug;
 use std::marker::PhantomPinned;
 use std::ops::Deref;
 
+use intrusive_collections::{intrusive_adapter, LinkedListLink, UnsafeRef};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use intrusive_collections::{LinkedListLink, intrusive_adapter, UnsafeRef};
 
 use crate::{Bucketize, CacheDb};
 
@@ -16,8 +16,8 @@ pub(crate) struct Entry<V> {
     // PLANNED: implement atomic lock transititon between two locks (as is, waiting on the rwlock will block the hashmap)
     // The Option is only used for delaying the construction.
     pub(crate) data: RwLock<Option<V>>,
-    lru_link: LinkedListLink, // protected by lru_list mutex
-    _pin: PhantomPinned,
+    lru_link:        LinkedListLink, // protected by lru_list mutex
+    _pin:            PhantomPinned,
 }
 
 intrusive_adapter!(pub(crate) EntryAdapter<V> = UnsafeRef<Entry<V>>: Entry<V> { lru_link: LinkedListLink });
@@ -25,9 +25,9 @@ intrusive_adapter!(pub(crate) EntryAdapter<V> = UnsafeRef<Entry<V>>: Entry<V> { 
 impl<V> Default for Entry<V> {
     fn default() -> Self {
         Entry {
-            data: RwLock::new(None),
+            data:     RwLock::new(None),
             lru_link: LinkedListLink::new(),
-            _pin: PhantomPinned,
+            _pin:     PhantomPinned,
         }
     }
 }
@@ -39,8 +39,8 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     pub(crate) cachedb: &'a CacheDb<K, V, N>,
-    pub(crate) entry: UnsafeRef<Entry<V>>,
-    pub(crate) guard: RwLockReadGuard<'a, Option<V>>,
+    pub(crate) entry:   UnsafeRef<Entry<V>>,
+    pub(crate) guard:   RwLockReadGuard<'a, Option<V>>,
 }
 
 impl<'a, K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
@@ -58,6 +58,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     type Target = V;
+
     fn deref(&self) -> &Self::Target {
         // unwrap is safe, the option is only None for a short time while constructing a new value
         (*self.guard).as_ref().unwrap()
@@ -71,7 +72,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     cachedb: &'a CacheDb<K, V, N>,
-    guard: RwLockWriteGuard<'a, V>,
+    guard:   RwLockWriteGuard<'a, V>,
 }
 
 impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
@@ -89,6 +90,7 @@ where
     K: Eq + Clone + Bucketize + Debug,
 {
     type Target = V;
+
     fn deref(&self) -> &Self::Target {
         &(*self.guard)
     }

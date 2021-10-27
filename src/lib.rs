@@ -96,16 +96,14 @@ use crate::entry::Entry;
 pub use crate::entry::{EntryReadGuard, EntryWriteGuard};
 
 mod bucket;
-use crate::bucket::Bucket;
-pub use crate::bucket::Bucketize;
-
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
-
 use intrusive_collections::UnsafeRef;
-
-//use intrusive_collections::linked_list::{Link, LinkedList};
+// use intrusive_collections::linked_list::{Link, LinkedList};
 use parking_lot::RwLockWriteGuard;
+
+use crate::bucket::Bucket;
+pub use crate::bucket::Bucketize;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn type_name<T>(_: &T) -> &str {
@@ -154,8 +152,8 @@ where
                 trace!("read lock: {:?}", key);
                 EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard: unsafe { (*entry_ptr).data.read() },
+                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
+                    guard:   unsafe { (*entry_ptr).data.read() },
                 }
             })
     }
@@ -179,8 +177,8 @@ where
                 trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard: unsafe { (*entry_ptr).data.read() },
+                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
+                    guard:   unsafe { (*entry_ptr).data.read() },
                 })
             }
             None => {
@@ -202,8 +200,8 @@ where
                 // Finally downgrade the lock to a readlock and return the Entry
                 Ok(EntryReadGuard {
                     cachedb: self,
-                    entry: unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard: RwLockWriteGuard::downgrade(wguard),
+                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
+                    guard:   RwLockWriteGuard::downgrade(wguard),
                 })
             }
         }
@@ -221,14 +219,16 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::*;
-    #[cfg(feature = "logging")]
-    use parking_lot::Once;
-    use rand::Rng;
     use std::collections::HashMap;
     use std::env;
     use std::sync::{Arc, Barrier};
     use std::{thread, time};
+
+    #[cfg(feature = "logging")]
+    use parking_lot::Once;
+    use rand::Rng;
+
+    use crate::*;
 
     #[cfg(feature = "logging")]
     static INIT: Once = Once::new();
@@ -262,9 +262,10 @@ mod test {
         init();
         let cdb = CacheDb::<String, String, 16>::new();
 
-        assert!(cdb
-            .get_or(&"foo".to_string(), |_| Ok("bar".to_string()))
-            .is_ok());
+        assert!(
+            cdb.get_or(&"foo".to_string(), |_| Ok("bar".to_string()))
+                .is_ok()
+        );
         assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
     }
 
