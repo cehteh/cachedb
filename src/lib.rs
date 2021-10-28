@@ -100,16 +100,16 @@
 //!   locking but a definitive solution would be the lock transpose.
 use std::fmt::Debug;
 
-mod entry;
-use crate::entry::Entry;
-pub use crate::entry::{EntryReadGuard, EntryWriteGuard};
-
-mod bucket;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
 use parking_lot::RwLockWriteGuard;
 
+mod entry;
+use crate::entry::Entry;
+pub use crate::entry::{EntryReadGuard, EntryWriteGuard, KeyTraits};
+
+mod bucket;
 use crate::bucket::Bucket;
 pub use crate::bucket::Bucketize;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -123,14 +123,14 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Debug)]
 pub struct CacheDb<K, V, const N: usize>
 where
-    K: Eq + Clone + Bucketize + Debug,
+    K: KeyTraits,
 {
     buckets: [Bucket<K, V>; N],
 }
 
 impl<K, V, const N: usize> CacheDb<K, V, N>
 where
-    K: Eq + Clone + Bucketize + Debug,
+    K: KeyTraits,
 {
     /// Create a new CacheDb
     pub fn new() -> CacheDb<K, V, N> {
@@ -152,13 +152,13 @@ where
         bucket.lock_map().get(key).map(|entry| {
             bucket.use_entry(entry);
 
-            let entry_ptr: *const Entry<V> = &**entry;
+            let entry_ptr: *const Entry<K, V> = &**entry;
             #[cfg(feature = "logging")]
             trace!("read lock: {:?}", key);
             EntryReadGuard {
                 bucket,
                 entry: unsafe { &*entry_ptr },
-                guard: unsafe { (*entry_ptr).data.read() },
+                guard: unsafe { (*entry_ptr).value.read() },
             }
         })
     }
@@ -178,25 +178,25 @@ where
             Some(entry) => {
                 bucket.use_entry(entry);
                 // Entry exists, return a locked ReadGuard to it
-                let entry_ptr: *const Entry<V> = &**entry;
+                let entry_ptr: *const Entry<K, V> = &**entry;
                 #[cfg(feature = "logging")]
                 trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
                     bucket,
                     entry: unsafe { &*entry_ptr },
-                    guard: unsafe { (*entry_ptr).data.read() },
+                    guard: unsafe { (*entry_ptr).value.read() },
                 })
             }
             None => {
                 // Entry does not exist, we create an empty (data == None) entry and holding a
                 // write lock on it
-                let new_entry = Box::pin(Entry::default());
-                let entry_ptr: *const Entry<V> = &*new_entry;
-                let mut wguard = unsafe { (*entry_ptr).data.write() };
+                let new_entry = Box::pin(Entry::new(key.clone()));
+                let entry_ptr: *const Entry<K, V> = &*new_entry;
+                let mut wguard = unsafe { (*entry_ptr).value.write() };
                 // insert the entry into the bucket
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
-                map_lock.insert(key.clone(), new_entry);
+                map_lock.insert(new_entry);
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
 
@@ -216,7 +216,7 @@ where
 
 impl<K, V, const N: usize> Default for CacheDb<K, V, N>
 where
-    K: Eq + Clone + Bucketize + Debug,
+    K: KeyTraits,
 {
     fn default() -> Self {
         Self::new()
@@ -254,6 +254,9 @@ mod test {
             r
         }
     }
+
+    impl KeyTraits for String {}
+    impl KeyTraits for u16 {}
 
     #[test]
     fn create() {

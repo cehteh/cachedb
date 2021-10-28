@@ -1,4 +1,5 @@
-use std::collections::{hash_map::DefaultHasher, HashMap};
+#![allow(clippy::type_complexity)]
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
@@ -11,13 +12,17 @@ use parking_lot::{Mutex, MutexGuard};
 
 use crate::entry::EntryAdapter;
 use crate::Entry;
+use crate::KeyTraits;
 use crate::UnsafeRef;
 
 /// The internal representation of a Bucket.
 #[derive(Debug)]
-pub(crate) struct Bucket<K: Eq + Bucketize + Debug, V> {
-    map:      Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
-    lru_list: Mutex<LinkedList<EntryAdapter<V>>>,
+pub(crate) struct Bucket<K, V>
+where
+    K: KeyTraits,
+{
+    map:      Mutex<HashSet<Pin<Box<Entry<K, V>>>>>,
+    lru_list: Mutex<LinkedList<EntryAdapter<K, V>>>,
 
     // Stats section
     cold: AtomicUsize,
@@ -25,21 +30,21 @@ pub(crate) struct Bucket<K: Eq + Bucketize + Debug, V> {
 
 impl<K, V> Bucket<K, V>
 where
-    K: Eq + Clone + Bucketize + Debug,
+    K: KeyTraits,
 {
     pub(crate) fn new() -> Self {
         Self {
-            map:      Mutex::new(HashMap::new()),
+            map:      Mutex::new(HashSet::new()),
             lru_list: Mutex::new(LinkedList::new(EntryAdapter::new())),
             cold:     AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn lock_map(&self) -> MutexGuard<HashMap<K, Pin<Box<Entry<V>>>>> {
+    pub(crate) fn lock_map(&self) -> MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>> {
         self.map.lock()
     }
 
-    pub(crate) fn use_entry(&self, entry: &Entry<V>) {
+    pub(crate) fn use_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
@@ -48,7 +53,7 @@ where
         entry.use_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn unuse_entry(&self, entry: &Entry<V>) {
+    pub(crate) fn unuse_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
         if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 0 {
             self.cold.fetch_add(1, Ordering::Relaxed);
