@@ -2,6 +2,7 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
@@ -10,6 +11,7 @@ use parking_lot::{Mutex, MutexGuard};
 
 use crate::entry::EntryAdapter;
 use crate::Entry;
+use crate::UnsafeRef;
 
 /// The internal representation of a Bucket.
 #[derive(Debug)]
@@ -33,8 +35,19 @@ where
         self.map.lock()
     }
 
-    pub(crate) fn lock_lru(&self) -> MutexGuard<LinkedList<EntryAdapter<V>>> {
-        self.lru_list.lock()
+    pub(crate) fn use_entry(&self, entry: &Entry<V>) {
+        let mut lru_lock = self.lru_list.lock();
+        if entry.lru_link.is_linked() {
+            unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
+        }
+        entry.use_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn unuse_entry(&self, entry: &Entry<V>) {
+        let mut lru_lock = self.lru_list.lock();
+        if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 0 {
+            lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+        }
     }
 }
 

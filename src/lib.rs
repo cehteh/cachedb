@@ -85,10 +85,7 @@
 //!
 //! * Until a full lock_transpose() which transfers locks automically becomes implemented,
 //!   waiting for a lock will block the whole bucket. This can be mitigated by finer grained
-//!   locking but a definitive solution would be the lock transfer. The workaround is not
-//!   planned to be implemented yet.
-//! * LRU list is not implemented yet
-//!
+//!   locking but a definitive solution would be the lock transpose.
 use std::fmt::Debug;
 
 mod entry;
@@ -99,16 +96,11 @@ mod bucket;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
-// use intrusive_collections::linked_list::{Link, LinkedList};
 use parking_lot::RwLockWriteGuard;
 
 use crate::bucket::Bucket;
 pub use crate::bucket::Bucketize;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-pub fn type_name<T>(_: &T) -> &str {
-    std::any::type_name::<T>()
-}
 
 /// CacheDb implements the concurrent (bucketed) Key/Value store.  Keys must implement
 /// 'Bucketize' which has more lax requirments than a full hash implmementation.  'N' is the
@@ -143,19 +135,20 @@ where
 
     /// Query the Entry associated with key for reading
     pub fn get<'a>(&'a self, key: &K) -> Option<EntryReadGuard<K, V, N>> {
-        self.buckets[key.bucket::<N>()]
-            .lock_map()
-            .get(key)
-            .map(|entry| {
-                let entry_ptr: *const Entry<V> = &**entry;
-                #[cfg(feature = "logging")]
-                trace!("read lock: {:?}", key);
-                EntryReadGuard {
-                    cachedb: self,
-                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard:   unsafe { (*entry_ptr).data.read() },
-                }
-            })
+        let bucket = &self.buckets[key.bucket::<N>()];
+
+        bucket.lock_map().get(key).map(|entry| {
+            bucket.use_entry(entry);
+
+            let entry_ptr: *const Entry<V> = &**entry;
+            #[cfg(feature = "logging")]
+            trace!("read lock: {:?}", key);
+            EntryReadGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: unsafe { (*entry_ptr).data.read() },
+            }
+        })
     }
 
     // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
@@ -171,14 +164,15 @@ where
 
         match map_lock.get(key) {
             Some(entry) => {
+                bucket.use_entry(entry);
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<V> = &**entry;
                 #[cfg(feature = "logging")]
                 trace!("read lock (existing): {:?}", key);
                 Ok(EntryReadGuard {
-                    cachedb: self,
-                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard:   unsafe { (*entry_ptr).data.read() },
+                    bucket,
+                    entry: unsafe { &*entry_ptr },
+                    guard: unsafe { (*entry_ptr).data.read() },
                 })
             }
             None => {
@@ -191,17 +185,17 @@ where
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
                 map_lock.insert(key.clone(), new_entry);
-                // release the bucket lock, we dont need it anymore
-                drop(bucket);
+                // release the map_lock, we dont need it anymore
+                drop(map_lock);
 
                 // but we have wguard here which allows us to constuct the inner guts
                 *wguard = Some(ctor(key)?);
 
                 // Finally downgrade the lock to a readlock and return the Entry
                 Ok(EntryReadGuard {
-                    cachedb: self,
-                    entry:   unsafe { UnsafeRef::from_raw(&*entry_ptr) },
-                    guard:   RwLockWriteGuard::downgrade(wguard),
+                    bucket,
+                    entry: unsafe { &*entry_ptr },
+                    guard: RwLockWriteGuard::downgrade(wguard),
                 })
             }
         }
