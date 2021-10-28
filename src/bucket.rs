@@ -2,7 +2,7 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
@@ -18,6 +18,9 @@ use crate::UnsafeRef;
 pub(crate) struct Bucket<K: Eq + Bucketize + Debug, V> {
     map:      Mutex<HashMap<K, Pin<Box<Entry<V>>>>>,
     lru_list: Mutex<LinkedList<EntryAdapter<V>>>,
+
+    // Stats section
+    cold: AtomicUsize,
 }
 
 impl<K, V> Bucket<K, V>
@@ -28,6 +31,7 @@ where
         Self {
             map:      Mutex::new(HashMap::new()),
             lru_list: Mutex::new(LinkedList::new(EntryAdapter::new())),
+            cold:     AtomicUsize::new(0),
         }
     }
 
@@ -39,6 +43,7 @@ where
         let mut lru_lock = self.lru_list.lock();
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
+            self.cold.fetch_sub(1, Ordering::Relaxed);
         }
         entry.use_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -46,6 +51,7 @@ where
     pub(crate) fn unuse_entry(&self, entry: &Entry<V>) {
         let mut lru_lock = self.lru_list.lock();
         if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 0 {
+            self.cold.fetch_add(1, Ordering::Relaxed);
             lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
         }
     }
