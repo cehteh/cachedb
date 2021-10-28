@@ -1,12 +1,14 @@
 //! In memory Key/Value store with LRU expire and concurrent access
 //!
-//! Items are stored in N bucketized HashMaps to improve concurrency.  Every Item is always
-//! behind a RwLock.  Quering an item will return a guard associated to this lock.  Items that
-//! are not locked in any way are kept in a list to implement a least-recent-used expire
-//! policy.  Locked items re removed for that lru list and pushed on its back when they become
-//! unlocked.  When items become locked the lock on the hosting HashMap becomes released.
-//! Thus locking items can not block any other access on the map.  This is obtained with some
-//! 'unsafe' code.
+//!
+//! Description
+//! ===========
+//!
+//! Items are stored in N sharded/bucketized HashMaps to improve concurrency.  Every Item is
+//! always behind a RwLock.  Quering an item will return a guard associated to this lock.
+//! Items that are not locked are kept in a list to implement a least-recent-used expire
+//! policy.  Locked items are removed from that lru list and put into the lru-list when they
+//! become unlocked.  Locked Items will not block the hosting HashMap.
 //!
 //!
 //! Implementation Discussion
@@ -14,7 +16,8 @@
 //!
 //! The HashMap storing the Items in Boxed entries.  Entries protect the actual item by a
 //! RwLock.  The API allows access to items only over these locks, returning wraped guards
-//! thereof.
+//! thereof. Since cConcurrent access to the Entries will not block the Hashmap, some
+//! 'unsafe' code is required which is hidden behind an safe API.
 //!
 //! New Items are constructed in an atomic way by passing a closure producing the item to the
 //! respective lookup function.  While an Item is constructed it has a write lock which
@@ -66,6 +69,14 @@
 //! employ other tactics to counter deadlocks.
 //!
 //!
+//! LRU List and expire configuration
+//! =================================
+//!
+//! Items that are not in use are pushed onto the tail of an least-recently-used
+//! list. Whenever a CacheDb decides to expire Items these are taken from the head of the
+//! lru-list and dropped.
+//!
+//!
 //! TESTS
 //! =====
 //!
@@ -76,8 +87,9 @@
 //!  * 'STRESS_ITERATIONS' how many iterations each thread shall do.  Defaults to 100.
 //!  * 'STRESS_RANGE' how many unique keys the test uses.  Defaults to 1000.
 //!
-//! The default values are rather small to make the test suite complete fast. For dedicated
+//! The default values are rather small to make the test suite complete in short time. For dedicated
 //! stress testing at least STRESS_ITERATIONS and STRESS_THREADS has to be incresed significantly.
+//! Try 'STRESS_ITERATIONS=10000 STRESS_RANGE=10000 STRESS_THREADS=10000' for some harder test.
 //!
 //!
 //! ISSUES
