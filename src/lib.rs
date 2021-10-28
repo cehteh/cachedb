@@ -98,8 +98,6 @@
 //! * Until a full lock_transpose() which transfers locks automically becomes implemented,
 //!   waiting for a lock will block the whole bucket. This can be mitigated by finer grained
 //!   locking but a definitive solution would be the lock transpose.
-use std::fmt::Debug;
-
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
@@ -120,7 +118,6 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// overhead.  Buckets by themself are not very expensive thus it is recommended to use a
 /// generous large enough number here.  Think about expected number of concurrenct accesses
 /// times four.
-#[derive(Debug)]
 pub struct CacheDb<K, V, const N: usize>
 where
     K: KeyTraits,

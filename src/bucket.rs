@@ -1,6 +1,5 @@
 #![allow(clippy::type_complexity)]
 use std::collections::{hash_map::DefaultHasher, HashSet};
-use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +15,6 @@ use crate::KeyTraits;
 use crate::UnsafeRef;
 
 /// The internal representation of a Bucket.
-#[derive(Debug)]
 pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
