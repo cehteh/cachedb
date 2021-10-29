@@ -2,7 +2,7 @@
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
@@ -15,6 +15,25 @@ use crate::KeyTraits;
 use crate::UnsafeRef;
 
 /// The internal representation of a Bucket.
+///
+/// The LRU eviction is per bucket, this is most efficient and catches the corner cases where
+/// one bucket sees more entries than others.
+///
+/// The eviction caclculation adapts itself and works as follows:
+///
+/// The maximum number of element in use (locked) at any time is tracked. This maximum number
+/// becomes decremented after 'max_cooldown' operations to catch the case when requirements
+/// drop over time. The number of elements in the LRU list is known as well. These two values
+/// are used to determine how percent the cached part makes up. Then the 'low_water' and
+/// 'high_water' settings come in. Below 'low_water' the cache fills up without evicting any
+/// entries, above 'low_water' entries from the head of the LRU list are slowly purged (one
+/// per every inserts_per_evict). Above 'high_water' entries become more aggressively purged
+/// ('evicts_per_insert').
+///
+/// The actual used 'low_water' and 'high_water' are derived from the '*_max' and '*_min'
+/// settings by linear interpolation from 0 to 'entries_limit'. Thus allowing a high cache
+/// ratio when memory requirements are modest and reduce the memory used for caching at higher
+/// loads.
 pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
@@ -23,7 +42,26 @@ where
     lru_list: Mutex<LinkedList<EntryAdapter<K, V>>>,
 
     // Stats section
-    cold: AtomicUsize,
+    cold:    AtomicUsize,
+    maxused: AtomicUsize,
+
+    // State section
+    maxused_countdown:  AtomicU32,
+    high_water:         AtomicU8,
+    low_water:          AtomicU8,
+    lowwater_countdown: AtomicU8,
+
+    // Configuration
+    pub(crate) maxused_cooldown: AtomicU32,
+    pub(crate) entries_limit:    AtomicUsize,
+
+    pub(crate) high_water_max:    AtomicU8,
+    pub(crate) high_water_min:    AtomicU8,
+    pub(crate) evicts_per_insert: AtomicU8,
+
+    pub(crate) low_water_max:     AtomicU8,
+    pub(crate) low_water_min:     AtomicU8,
+    pub(crate) inserts_per_evict: AtomicU8,
 }
 
 impl<K, V> Bucket<K, V>
@@ -32,9 +70,22 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            map:      Mutex::new(HashSet::new()),
-            lru_list: Mutex::new(LinkedList::new(EntryAdapter::new())),
-            cold:     AtomicUsize::new(0),
+            map:                Mutex::new(HashSet::new()),
+            lru_list:           Mutex::new(LinkedList::new(EntryAdapter::new())),
+            cold:               AtomicUsize::new(0),
+            maxused:            AtomicUsize::new(0),
+            maxused_countdown:  AtomicU32::new(0),
+            high_water:         AtomicU8::new(50),
+            low_water:          AtomicU8::new(25),
+            lowwater_countdown: AtomicU8::new(2),
+            maxused_cooldown:   AtomicU32::new(1024),
+            entries_limit:      AtomicUsize::new(10000000),
+            high_water_max:     AtomicU8::new(50),
+            high_water_min:     AtomicU8::new(10),
+            evicts_per_insert:  AtomicU8::new(2),
+            low_water_max:      AtomicU8::new(25),
+            low_water_min:      AtomicU8::new(5),
+            inserts_per_evict:  AtomicU8::new(2),
         }
     }
 

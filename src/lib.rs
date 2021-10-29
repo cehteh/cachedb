@@ -132,12 +132,6 @@ where
     /// Create a new CacheDb
     pub fn new() -> CacheDb<K, V, N> {
         CacheDb {
-            // highwater_mark: AtomicUsize::new(50),
-            // evicts_per_insert: AtomicUsize::new(2),
-            // lowwater_mark: AtomicUsize::new(10),
-            // inserts_per_evict: AtomicUsize::new(2),
-            // cold: AtomicUsize::new(0),
-            // lru_list: RwLock<LinkedList>
             buckets: [(); N].map(|()| Bucket::new()),
         }
     }
