@@ -158,7 +158,7 @@ where
     //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
     //       real ctor then.
     /// Query an Entry for reading or construct it (atomically)
-    pub fn get_or<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
+    pub fn get_or_insert<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
     where
         F: FnOnce(&K) -> Result<V>,
     {
@@ -263,7 +263,7 @@ mod test {
         let cdb = CacheDb::<String, String, 16>::new();
 
         assert!(
-            cdb.get_or(&"foo".to_string(), |_| Ok("bar".to_string()))
+            cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
                 .is_ok()
         );
         assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
@@ -322,8 +322,8 @@ mod test {
                                     // TODO: touch
                                 } else if p <= 50 {
                                     #[cfg(feature = "logging")]
-                                    trace!("get_or {} and keep it", r);
-                                    locked.insert(r, cdb.get_or(&r, |_| Ok(!r)).unwrap());
+                                    trace!("get_or_insert {} and keep it", r);
+                                    locked.insert(r, cdb.get_or_insert(&r, |_| Ok(!r)).unwrap());
                                 } else if p <= 55 {
                                     // TODO: get_mut_or work
                                 } else if p <= 60 {
@@ -331,14 +331,14 @@ mod test {
                                 } else if p <= 80 {
                                     #[cfg(feature = "logging")]
                                     trace!("get_or {} and then wait/work for {:?}", r, w);
-                                    let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                                    let lock = cdb.get_or_insert(&r, |_| Ok(!r)).unwrap();
                                     thread::sleep(w);
                                     drop(lock);
                                 } else {
                                     #[cfg(feature = "logging")]
                                     trace!("wait/work for {:?} and then get_or {}", w, r);
                                     thread::sleep(w);
-                                    let lock = cdb.get_or(&r, |_| Ok(!r)).unwrap();
+                                    let lock = cdb.get_or_insert(&r, |_| Ok(!r)).unwrap();
                                     drop(lock);
                                 }
                             }
