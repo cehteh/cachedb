@@ -22,13 +22,13 @@ use crate::UnsafeRef;
 /// The eviction caclculation adapts itself and works as follows:
 ///
 /// The maximum number of elements in use (locked) at any time is tracked. This maximum number
-/// becomes decremented after 'max_cooldown' operations to catch the case when requirements
-/// drop over time. The number of elements in the LRU list is known as well. These two values
-/// are used to determine how percent the cached part makes up. Then the 'low_water' and
-/// 'high_water' settings come in. Below 'low_water' the cache fills up without evicting any
-/// entries, above 'low_water' entries from the head of the LRU list are slowly purged (one
-/// per every inserts_per_evict). Above 'high_water' entries become more aggressively purged
-/// ('evicts_per_insert').
+/// becomes decreased by 'maxused/maxused_reduction+1' after 'max_cooldown' operations to
+/// catch the case when requirements drop over time. The number of elements in the LRU list is
+/// known as well. These two values are used to determine how percent the cached part makes
+/// up. Then the 'low_water' and 'high_water' settings come in. Below 'low_water' the cache
+/// fills up without evicting any entries, above 'low_water' entries from the head of the LRU
+/// list are slowly purged (one per every inserts_per_evict). Above 'high_water' entries
+/// become more aggressively purged ('evicts_per_insert').
 ///
 /// The actual used 'low_water' and 'high_water' are derived from the '*_max' and '*_min'
 /// settings by linear interpolation from 0 to 'entries_limit'. Thus allowing a high cache
@@ -52,8 +52,9 @@ where
     lowwater_countdown: AtomicU8,
 
     // Configuration
-    pub(crate) maxused_cooldown: AtomicU32,
-    pub(crate) entries_limit:    AtomicUsize,
+    pub(crate) maxused_cooldown:  AtomicU32,
+    pub(crate) maxused_reduction: AtomicUsize,
+    pub(crate) entries_limit:     AtomicUsize,
 
     pub(crate) high_water_max:    AtomicU8,
     pub(crate) high_water_min:    AtomicU8,
@@ -79,6 +80,7 @@ where
             low_water:          AtomicU8::new(30),
             lowwater_countdown: AtomicU8::new(2),
             maxused_cooldown:   AtomicU32::new(1024),
+            maxused_reduction:  AtomicUsize::new(8192),
             entries_limit:      AtomicUsize::new(10000000),
             high_water_max:     AtomicU8::new(60),
             high_water_min:     AtomicU8::new(10),
@@ -119,11 +121,9 @@ where
     pub(crate) fn update_maxused(&self, map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>) {
         // since we got the map locked we can be sloppy with atomics
 
+        let now_used = map_lock.len() - self.cold.load(Ordering::Relaxed);
         // update maxused
-        self.maxused.fetch_max(
-            map_lock.len() - self.cold.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        self.maxused.fetch_max(now_used, Ordering::Relaxed);
 
         // maxused_countdown handling
         let countdown = self.maxused_countdown.load(Ordering::Relaxed);
@@ -138,8 +138,8 @@ where
                 Ordering::Relaxed,
             );
             let mut maxused = self.maxused.load(Ordering::Relaxed);
-            if maxused > 0 {
-                maxused -= 1;
+            if maxused > 0 && maxused != now_used {
+                maxused -= maxused / self.maxused_reduction.load(Ordering::Relaxed) + 1;
                 self.maxused.store(maxused, Ordering::Relaxed);
             }
 
