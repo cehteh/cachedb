@@ -21,7 +21,7 @@ use crate::UnsafeRef;
 ///
 /// The eviction caclculation adapts itself and works as follows:
 ///
-/// The maximum number of element in use (locked) at any time is tracked. This maximum number
+/// The maximum number of elements in use (locked) at any time is tracked. This maximum number
 /// becomes decremented after 'max_cooldown' operations to catch the case when requirements
 /// drop over time. The number of elements in the LRU list is known as well. These two values
 /// are used to determine how percent the cached part makes up. Then the 'low_water' and
@@ -75,15 +75,15 @@ where
             cold:               AtomicUsize::new(0),
             maxused:            AtomicUsize::new(0),
             maxused_countdown:  AtomicU32::new(0),
-            high_water:         AtomicU8::new(50),
-            low_water:          AtomicU8::new(25),
+            high_water:         AtomicU8::new(60),
+            low_water:          AtomicU8::new(30),
             lowwater_countdown: AtomicU8::new(2),
             maxused_cooldown:   AtomicU32::new(1024),
             entries_limit:      AtomicUsize::new(10000000),
-            high_water_max:     AtomicU8::new(50),
+            high_water_max:     AtomicU8::new(60),
             high_water_min:     AtomicU8::new(10),
             evicts_per_insert:  AtomicU8::new(2),
-            low_water_max:      AtomicU8::new(25),
+            low_water_max:      AtomicU8::new(30),
             low_water_min:      AtomicU8::new(5),
             inserts_per_evict:  AtomicU8::new(2),
         }
@@ -93,11 +93,16 @@ where
         self.map.lock()
     }
 
-    pub(crate) fn use_entry(&self, entry: &Entry<K, V>) {
+    pub(crate) fn use_entry(
+        &self,
+        entry: &Entry<K, V>,
+        map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
+    ) {
         let mut lru_lock = self.lru_list.lock();
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
             self.cold.fetch_sub(1, Ordering::Relaxed);
+            self.update_maxused(map_lock);
         }
         entry.use_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -107,6 +112,38 @@ where
         if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 0 {
             self.cold.fetch_add(1, Ordering::Relaxed);
             lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+        }
+    }
+
+    /// takes the len from the locked map
+    pub(crate) fn update_maxused(&self, map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>) {
+        // since we got the map locked we can be sloppy with atomics
+
+        // update maxused
+        self.maxused.fetch_max(
+            map_lock.len() - self.cold.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+
+        // maxused_countdown handling
+        let countdown = self.maxused_countdown.load(Ordering::Relaxed);
+        if countdown > 0 {
+            // just keep counting down
+            self.maxused_countdown
+                .store(countdown - 1, Ordering::Relaxed)
+        } else {
+            // Do some work, reset it to cooldown period, decrement maxused
+            self.maxused_countdown.store(
+                self.maxused_cooldown.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            let mut maxused = self.maxused.load(Ordering::Relaxed);
+            if maxused > 0 {
+                maxused -= 1;
+                self.maxused.store(maxused, Ordering::Relaxed);
+            }
+
+            // TODO: recalculate low/highwater
         }
     }
 }

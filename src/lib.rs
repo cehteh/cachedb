@@ -139,9 +139,10 @@ where
     /// Query the Entry associated with key for reading
     pub fn get<'a>(&'a self, key: &K) -> Option<EntryReadGuard<K, V, N>> {
         let bucket = &self.buckets[key.bucket::<N>()];
+        let map_lock = bucket.lock_map();
 
-        bucket.lock_map().get(key).map(|entry| {
-            bucket.use_entry(entry);
+        map_lock.get(key).map(|entry| {
+            bucket.use_entry(entry, &map_lock);
 
             let entry_ptr: *const Entry<K, V> = &**entry;
             #[cfg(feature = "logging")]
@@ -167,7 +168,7 @@ where
 
         match map_lock.get(key) {
             Some(entry) => {
-                bucket.use_entry(entry);
+                bucket.use_entry(entry, &map_lock);
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<K, V> = &**entry;
                 #[cfg(feature = "logging")]
@@ -188,6 +189,7 @@ where
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
                 map_lock.insert(new_entry);
+                bucket.update_maxused(&map_lock);
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
 
