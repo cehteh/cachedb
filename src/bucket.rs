@@ -111,7 +111,7 @@ where
 
     pub(crate) fn unuse_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
-        if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 0 {
+        if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.cold.fetch_add(1, Ordering::Relaxed);
             lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
         }
