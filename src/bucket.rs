@@ -31,9 +31,9 @@ use crate::UnsafeRef;
 /// become more aggressively purged ('evicts_per_insert').
 ///
 /// The actual used 'low_water' and 'high_water' are derived from the '*_max' and '*_min'
-/// settings by linear interpolation from 0 to 'entries_limit'. Thus allowing a high cache
-/// ratio when memory requirements are modest and reduce the memory used for caching at higher
-/// loads.
+/// settings by linear interpolation from 'min_entries_limit' to 'max_entries_limit'. Thus
+/// allowing a high cache ratio when memory requirements are modest and reduce the memory
+/// usage for caching at higher memory loads.
 pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
@@ -42,19 +42,20 @@ where
     lru_list: Mutex<LinkedList<EntryAdapter<K, V>>>,
 
     // Stats section
-    cold:    AtomicUsize,
-    maxused: AtomicUsize,
+    pub(crate) cold: AtomicUsize,
+    maxused:         AtomicUsize,
 
     // State section
-    maxused_countdown:  AtomicU32,
-    high_water:         AtomicU8,
-    low_water:          AtomicU8,
-    lowwater_countdown: AtomicU8,
+    maxused_countdown:             AtomicU32,
+    pub(crate) high_water:         AtomicU8,
+    pub(crate) low_water:          AtomicU8,
+    pub(crate) lowwater_countdown: AtomicU8,
 
     // Configuration
     pub(crate) maxused_cooldown:  AtomicU32,
     pub(crate) maxused_reduction: AtomicUsize,
-    pub(crate) entries_limit:     AtomicUsize,
+    pub(crate) max_entries_limit: AtomicUsize,
+    pub(crate) min_entries_limit: AtomicUsize,
 
     pub(crate) high_water_max:    AtomicU8,
     pub(crate) high_water_min:    AtomicU8,
@@ -79,15 +80,16 @@ where
             high_water:         AtomicU8::new(60),
             low_water:          AtomicU8::new(30),
             lowwater_countdown: AtomicU8::new(2),
-            maxused_cooldown:   AtomicU32::new(1024),
-            maxused_reduction:  AtomicUsize::new(8192),
-            entries_limit:      AtomicUsize::new(10000000),
+            maxused_cooldown:   AtomicU32::new(1000),
+            maxused_reduction:  AtomicUsize::new(10000),
+            max_entries_limit:  AtomicUsize::new(10000000),
+            min_entries_limit:  AtomicUsize::new(1000),
             high_water_max:     AtomicU8::new(60),
             high_water_min:     AtomicU8::new(10),
-            evicts_per_insert:  AtomicU8::new(2),
+            evicts_per_insert:  AtomicU8::new(4),
             low_water_max:      AtomicU8::new(30),
             low_water_min:      AtomicU8::new(5),
-            inserts_per_evict:  AtomicU8::new(2),
+            inserts_per_evict:  AtomicU8::new(4),
         }
     }
 
@@ -118,12 +120,16 @@ where
     }
 
     /// takes the len from the locked map
-    pub(crate) fn update_maxused(&self, map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>) {
+    pub(crate) fn update_maxused(
+        &self,
+        map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
+    ) -> usize {
         // since we got the map locked we can be sloppy with atomics
 
         let now_used = map_lock.len() - self.cold.load(Ordering::Relaxed);
         // update maxused
         self.maxused.fetch_max(now_used, Ordering::Relaxed);
+        let mut maxused = self.maxused.load(Ordering::Relaxed);
 
         // maxused_countdown handling
         let countdown = self.maxused_countdown.load(Ordering::Relaxed);
@@ -137,7 +143,6 @@ where
                 self.maxused_cooldown.load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            let mut maxused = self.maxused.load(Ordering::Relaxed);
             if maxused > 0 && maxused != now_used {
                 maxused -= maxused / self.maxused_reduction.load(Ordering::Relaxed) + 1;
                 self.maxused.store(maxused, Ordering::Relaxed);
@@ -145,6 +150,28 @@ where
 
             // TODO: recalculate low/highwater
         }
+
+        maxused
+    }
+
+    /// evicts up to 'n' entries from the LRU list. Returns the number of evicted entries which
+    /// may be less than 'n' in case the list got depleted.
+    pub fn evict(
+        &self,
+        n: usize,
+        map_lock: &mut MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
+    ) -> usize {
+        #[cfg(feature = "logging")]
+        debug!("evicting {} elements", n);
+        for i in 0..n {
+            if let Some(entry) = self.lru_list.lock().pop_front() {
+                map_lock.remove(&entry.key);
+                self.cold.fetch_sub(1, Ordering::Relaxed);
+            } else {
+                return i;
+            }
+        }
+        n
     }
 }
 

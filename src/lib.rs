@@ -98,6 +98,8 @@
 //! * Until a full lock_transpose() which transfers locks automically becomes implemented,
 //!   waiting for a lock will block the whole bucket. This can be mitigated by finer grained
 //!   locking but a definitive solution would be the lock transpose.
+use std::sync::atomic::Ordering;
+
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
@@ -189,7 +191,32 @@ where
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
                 map_lock.insert(new_entry);
-                bucket.update_maxused(&map_lock);
+                let maxused = bucket.update_maxused(&map_lock);
+
+                // high/lowwater eviction
+                let cold = bucket.cold.load(Ordering::Relaxed);
+                let percent_cold = (cold * 100 / (cold + maxused)) as u8;
+                if percent_cold >= bucket.high_water.load(Ordering::Relaxed) {
+                    bucket.evict(
+                        bucket.evicts_per_insert.load(Ordering::Relaxed) as usize,
+                        &mut map_lock,
+                    );
+                } else if percent_cold >= bucket.low_water.load(Ordering::Relaxed) {
+                    let countdown = bucket.lowwater_countdown.load(Ordering::Relaxed);
+                    if countdown > 0 {
+                        // just keep counting down
+                        bucket
+                            .lowwater_countdown
+                            .store(countdown - 1, Ordering::Relaxed)
+                    } else {
+                        bucket.lowwater_countdown.store(
+                            bucket.inserts_per_evict.load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
+                        bucket.evict(1, &mut map_lock);
+                    }
+                }
+
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
 
@@ -314,11 +341,14 @@ mod test {
                         let p = rng.gen_range(1..100);
                         // w is the wait time to simulate thread work
                         let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
-
                         match locked.remove(&r) {
                             // thread had no lock stored, create a new entry
                             None => {
-                                if p <= 15 {
+                                if p <= 1 {
+                                    #[cfg(feature = "logging")]
+                                    trace!("drop all stored locks");
+                                    locked.clear();
+                                } else if p <= 15 {
                                     // TODO: remove
                                 } else if p <= 30 {
                                     // TODO: touch

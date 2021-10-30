@@ -1,9 +1,9 @@
 [package]
 name = "cachedb"
-version = "0.0.0"
+version = "0.0.1"
 authors = ["Christian Thäter <ct@pipapo.org>"]
 edition = "2021"
-description = "Key/Value store that stores RwLock<Value> which expire in LRU order when unused"
+description = "In memory Key/Value store that stores RwLock<Value> which expire in LRU order when unused"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cehteh/cachedb.git"
 keywords = ["collection", "cache"]
