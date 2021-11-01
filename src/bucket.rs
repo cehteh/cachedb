@@ -21,19 +21,18 @@ use crate::UnsafeRef;
 ///
 /// The eviction caclculation adapts itself and works as follows:
 ///
-/// The maximum number of elements in use (locked) at any time is tracked. This maximum number
-/// becomes decreased by 'maxused/maxused_reduction+1' after 'max_cooldown' operations to
-/// catch the case when requirements drop over time. The number of elements in the LRU list is
-/// known as well. These two values are used to determine how percent the cached part makes
-/// up. Then the 'low_water' and 'high_water' settings come in. Below 'low_water' the cache
-/// fills up without evicting any entries, above 'low_water' entries from the head of the LRU
-/// list are slowly purged (one per every inserts_per_evict). Above 'high_water' entries
-/// become more aggressively purged ('evicts_per_insert').
+/// The maximum number of elements used is tracked. This maximum number becomes decreased by
+/// 'maxused/maxused_reduction+1' after 'max_cooldown' operations. The number of elements in
+/// the LRU list is known as well. These two values are used to determine how percent the
+/// cached part makes up. As long the hash table has free entries within its capacity things
+/// become cached. When the capacity is depleted it is checked if the percent cached items
+/// exceed the configured 'cold_target' percentage. If so, some 'evict_batch' entries are
+/// dropped, if not a new entry will just be added to the hashtable which will force it to grow.
 ///
-/// The actual used 'low_water' and 'high_water' are derived from the '*_max' and '*_min'
-/// settings by linear interpolation from 'min_entries_limit' to 'max_entries_limit'. Thus
-/// allowing a high cache ratio when memory requirements are modest and reduce the memory
-/// usage for caching at higher memory loads.
+/// The 'cold_target' percentage is calculated by to be between 'cold_max' to 'cold_min' by by
+/// linear interpolation from 'min_entries_limit' to 'max_entries_limit'. Thus allowing a high
+/// cache ratio when memory requirements are modest and reduce the memory usage for caching at
+/// higher memory loads.
 pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
@@ -46,10 +45,8 @@ where
     maxused:         AtomicUsize,
 
     // State section
-    maxused_countdown:             AtomicU32,
-    pub(crate) high_water:         AtomicU8,
-    pub(crate) low_water:          AtomicU8,
-    pub(crate) lowwater_countdown: AtomicU8,
+    maxused_countdown:      AtomicU32,
+    pub(crate) cold_target: AtomicU8,
 
     // Configuration
     pub(crate) maxused_cooldown:  AtomicU32,
@@ -57,13 +54,9 @@ where
     pub(crate) max_entries_limit: AtomicUsize,
     pub(crate) min_entries_limit: AtomicUsize,
 
-    pub(crate) high_water_max:    AtomicU8,
-    pub(crate) high_water_min:    AtomicU8,
-    pub(crate) evicts_per_insert: AtomicU8,
-
-    pub(crate) low_water_max:     AtomicU8,
-    pub(crate) low_water_min:     AtomicU8,
-    pub(crate) inserts_per_evict: AtomicU8,
+    pub(crate) cold_max:    AtomicU8,
+    pub(crate) cold_min:    AtomicU8,
+    pub(crate) evict_batch: AtomicU8,
 }
 
 impl<K, V> Bucket<K, V>
@@ -72,24 +65,19 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            map:                Mutex::new(HashSet::new()),
-            lru_list:           Mutex::new(LinkedList::new(EntryAdapter::new())),
-            cold:               AtomicUsize::new(0),
-            maxused:            AtomicUsize::new(0),
-            maxused_countdown:  AtomicU32::new(0),
-            high_water:         AtomicU8::new(60),
-            low_water:          AtomicU8::new(30),
-            lowwater_countdown: AtomicU8::new(2),
-            maxused_cooldown:   AtomicU32::new(1000),
-            maxused_reduction:  AtomicUsize::new(10000),
-            max_entries_limit:  AtomicUsize::new(10000000),
-            min_entries_limit:  AtomicUsize::new(1000),
-            high_water_max:     AtomicU8::new(60),
-            high_water_min:     AtomicU8::new(10),
-            evicts_per_insert:  AtomicU8::new(4),
-            low_water_max:      AtomicU8::new(30),
-            low_water_min:      AtomicU8::new(5),
-            inserts_per_evict:  AtomicU8::new(4),
+            map:               Mutex::new(HashSet::new()),
+            lru_list:          Mutex::new(LinkedList::new(EntryAdapter::new())),
+            cold:              AtomicUsize::new(0),
+            maxused:           AtomicUsize::new(0),
+            maxused_countdown: AtomicU32::new(0),
+            cold_target:       AtomicU8::new(50),
+            maxused_cooldown:  AtomicU32::new(1000),
+            maxused_reduction: AtomicUsize::new(10000),
+            max_entries_limit: AtomicUsize::new(10000000),
+            min_entries_limit: AtomicUsize::new(1000),
+            cold_max:          AtomicU8::new(60),
+            cold_min:          AtomicU8::new(5),
+            evict_batch:       AtomicU8::new(4),
         }
     }
 
@@ -119,14 +107,16 @@ where
         }
     }
 
-    /// takes the len from the locked map
+    /// Updates the max used entry stat. This is called before creating a new entry, thus it
+    /// preempts this by adding one to the length queried from the map.
+    /// returns the adjusted 'maxused' value.
     pub(crate) fn update_maxused(
         &self,
         map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
     ) -> usize {
         // since we got the map locked we can be sloppy with atomics
 
-        let now_used = map_lock.len() - self.cold.load(Ordering::Relaxed);
+        let now_used = map_lock.len() + 1 - self.cold.load(Ordering::Relaxed);
         // update maxused
         self.maxused.fetch_max(now_used, Ordering::Relaxed);
         let mut maxused = self.maxused.load(Ordering::Relaxed);

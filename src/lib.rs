@@ -187,35 +187,27 @@ where
                 let new_entry = Box::pin(Entry::new(key.clone()));
                 let entry_ptr: *const Entry<K, V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).value.write() };
+
+                // do the LRU stuff, maybe evict old entries
+                let maxused = bucket.update_maxused(&map_lock);
+
+                if map_lock.len() == map_lock.capacity() {
+                    let cold = bucket.cold.load(Ordering::Relaxed);
+                    let percent_cold = (cold * 100 / (cold + maxused)) as u8;
+
+                    if percent_cold > bucket.cold_target.load(Ordering::Relaxed) {
+                        // ok lets evict some entries
+                        bucket.evict(
+                            bucket.evict_batch.load(Ordering::Relaxed) as usize,
+                            &mut map_lock,
+                        );
+                    }
+                }
+
                 // insert the entry into the bucket
                 #[cfg(feature = "logging")]
                 trace!("create for reading: {:?}", &key);
                 map_lock.insert(new_entry);
-                let maxused = bucket.update_maxused(&map_lock);
-
-                // high/lowwater eviction
-                let cold = bucket.cold.load(Ordering::Relaxed);
-                let percent_cold = (cold * 100 / (cold + maxused)) as u8;
-                if percent_cold >= bucket.high_water.load(Ordering::Relaxed) {
-                    bucket.evict(
-                        bucket.evicts_per_insert.load(Ordering::Relaxed) as usize,
-                        &mut map_lock,
-                    );
-                } else if percent_cold >= bucket.low_water.load(Ordering::Relaxed) {
-                    let countdown = bucket.lowwater_countdown.load(Ordering::Relaxed);
-                    if countdown > 0 {
-                        // just keep counting down
-                        bucket
-                            .lowwater_countdown
-                            .store(countdown - 1, Ordering::Relaxed)
-                    } else {
-                        bucket.lowwater_countdown.store(
-                            bucket.inserts_per_evict.load(Ordering::Relaxed),
-                            Ordering::Relaxed,
-                        );
-                        bucket.evict(1, &mut map_lock);
-                    }
-                }
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
