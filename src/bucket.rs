@@ -26,10 +26,10 @@ use crate::UnsafeRef;
 /// the LRU list is known as well. These two values are used to determine how percent the
 /// cached part makes up. As long the hash table has free entries within its capacity things
 /// become cached. When the capacity is depleted it is checked if the percent cached items
-/// exceed the configured 'cold_target' percentage. If so, some 'evict_batch' entries are
+/// exceed the configured 'cache_target' percentage. If so, some 'evict_batch' entries are
 /// dropped, if not a new entry will just be added to the hashtable which will force it to grow.
 ///
-/// The 'cold_target' percentage is calculated by to be between 'cold_max' to 'cold_min' by by
+/// The 'cache_target' percentage is calculated by to be between 'cache_max' to 'cache_min' by by
 /// linear interpolation from 'min_entries_limit' to 'max_entries_limit'. Thus allowing a high
 /// cache ratio when memory requirements are modest and reduce the memory usage for caching at
 /// higher memory loads.
@@ -41,12 +41,12 @@ where
     lru_list: Mutex<LinkedList<EntryAdapter<K, V>>>,
 
     // Stats section
-    pub(crate) cold: AtomicUsize,
-    maxused:         AtomicUsize,
+    pub(crate) cached: AtomicUsize,
+    maxused:           AtomicUsize,
 
     // State section
-    maxused_countdown:      AtomicU32,
-    pub(crate) cold_target: AtomicU8,
+    maxused_countdown:       AtomicU32,
+    pub(crate) cache_target: AtomicU8,
 
     // Configuration
     pub(crate) maxused_cooldown:  AtomicU32,
@@ -54,8 +54,8 @@ where
     pub(crate) max_entries_limit: AtomicUsize,
     pub(crate) min_entries_limit: AtomicUsize,
 
-    pub(crate) cold_max:    AtomicU8,
-    pub(crate) cold_min:    AtomicU8,
+    pub(crate) cache_max:   AtomicU8,
+    pub(crate) cache_min:   AtomicU8,
     pub(crate) evict_batch: AtomicU8,
 }
 
@@ -67,17 +67,17 @@ where
         Self {
             map:               Mutex::new(HashSet::new()),
             lru_list:          Mutex::new(LinkedList::new(EntryAdapter::new())),
-            cold:              AtomicUsize::new(0),
+            cached:            AtomicUsize::new(0),
             maxused:           AtomicUsize::new(0),
             maxused_countdown: AtomicU32::new(0),
-            cold_target:       AtomicU8::new(50),
+            cache_target:      AtomicU8::new(50),
             maxused_cooldown:  AtomicU32::new(1000),
             maxused_reduction: AtomicUsize::new(10000),
             max_entries_limit: AtomicUsize::new(10000000),
             min_entries_limit: AtomicUsize::new(1000),
-            cold_max:          AtomicU8::new(60),
-            cold_min:          AtomicU8::new(5),
-            evict_batch:       AtomicU8::new(4),
+            cache_max:         AtomicU8::new(50),
+            cache_min:         AtomicU8::new(5),
+            evict_batch:       AtomicU8::new(16),
         }
     }
 
@@ -93,7 +93,7 @@ where
         let mut lru_lock = self.lru_list.lock();
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
-            self.cold.fetch_sub(1, Ordering::Relaxed);
+            self.cached.fetch_sub(1, Ordering::Relaxed);
             self.update_maxused(map_lock);
         }
         entry.use_count.fetch_add(1, Ordering::Relaxed);
@@ -102,7 +102,7 @@ where
     pub(crate) fn unuse_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
         if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.cold.fetch_add(1, Ordering::Relaxed);
+            self.cached.fetch_add(1, Ordering::Relaxed);
             lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
         }
     }
@@ -116,7 +116,7 @@ where
     ) -> usize {
         // since we got the map locked we can be sloppy with atomics
 
-        let now_used = map_lock.len() + 1 - self.cold.load(Ordering::Relaxed);
+        let now_used = map_lock.len() + 1 - self.cached.load(Ordering::Relaxed);
         // update maxused
         self.maxused.fetch_max(now_used, Ordering::Relaxed);
         let mut maxused = self.maxused.load(Ordering::Relaxed);
@@ -156,7 +156,7 @@ where
         for i in 0..n {
             if let Some(entry) = self.lru_list.lock().pop_front() {
                 map_lock.remove(&entry.key);
-                self.cold.fetch_sub(1, Ordering::Relaxed);
+                self.cached.fetch_sub(1, Ordering::Relaxed);
             } else {
                 return i;
             }

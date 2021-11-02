@@ -192,10 +192,10 @@ where
                 let maxused = bucket.update_maxused(&map_lock);
 
                 if map_lock.len() == map_lock.capacity() {
-                    let cold = bucket.cold.load(Ordering::Relaxed);
-                    let percent_cold = (cold * 100 / (cold + maxused)) as u8;
+                    let cached = bucket.cached.load(Ordering::Relaxed);
+                    let percent_cached = (cached * 100 / (cached + maxused)) as u8;
 
-                    if percent_cold > bucket.cold_target.load(Ordering::Relaxed) {
+                    if percent_cached > bucket.cache_target.load(Ordering::Relaxed) {
                         // ok lets evict some entries
                         bucket.evict(
                             bucket.evict_batch.load(Ordering::Relaxed) as usize,
