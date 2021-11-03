@@ -157,6 +157,25 @@ where
         })
     }
 
+    /// Query the Entry associated with key for writing
+    pub fn get_mut<'a>(&'a self, key: &K) -> Option<EntryWriteGuard<K, V, N>> {
+        let bucket = &self.buckets[key.bucket::<N>()];
+        let map_lock = bucket.lock_map();
+
+        map_lock.get(key).map(|entry| {
+            bucket.use_entry(entry);
+
+            let entry_ptr: *const Entry<K, V> = &**entry;
+            #[cfg(feature = "logging")]
+            trace!("write lock: {:?}", key);
+            EntryWriteGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: unsafe { (*entry_ptr).value.write() },
+            }
+        })
+    }
+
     // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
     //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
     //       real ctor then.
@@ -433,6 +452,18 @@ mod test {
                 .is_ok()
         );
         assert_eq!(*cdb.get(&"bar2".to_string()).unwrap(), "foo2".to_string());
+    }
+
+    #[test]
+    fn mutate() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+
+        *cdb.get_mut(&"foo".to_string()).unwrap() = "baz".to_string();
+        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "baz".to_string());
     }
 
     #[test]

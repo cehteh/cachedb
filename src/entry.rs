@@ -1,7 +1,8 @@
 use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "logging")]
 use std::fmt::Debug;
 use std::marker::PhantomPinned;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::hash::{Hash, Hasher};
 use std::borrow::Borrow;
@@ -72,7 +73,7 @@ where
     }
 }
 
-/// RAII Guard for the read lock. Manages to put unused entries into the LRU list.
+/// Guard for the read lock. Puts unused entries into the LRU list.
 pub struct EntryReadGuard<'a, K, V, const N: usize>
 where
     K: KeyTraits,
@@ -103,14 +104,14 @@ where
     }
 }
 
-/// RAII Guard for the write lock. Manages to put unused entries into the LRU list.
+/// Guard for the write lock. Puts unused entries into the LRU list.
 pub struct EntryWriteGuard<'a, K, V, const N: usize>
 where
     K: KeyTraits,
 {
     pub(crate) bucket: &'a Bucket<K, V>,
     pub(crate) entry:  &'a Entry<K, V>,
-    guard:             RwLockWriteGuard<'a, V>,
+    pub(crate) guard:  RwLockWriteGuard<'a, Option<V>>,
 }
 
 impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
@@ -129,6 +130,17 @@ where
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        &(*self.guard)
+        // unwrap is safe, the option is only None for a short time while constructing a new value
+        (*self.guard).as_ref().unwrap()
+    }
+}
+
+impl<'a, K, V, const N: usize> DerefMut for EntryWriteGuard<'_, K, V, N>
+where
+    K: KeyTraits,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // unwrap is safe, the option is only None for a short time while constructing a new value
+        (*self.guard).as_mut().unwrap()
     }
 }
