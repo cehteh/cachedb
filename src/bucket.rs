@@ -93,6 +93,54 @@ where
         }
     }
 
+    /// recalculates the 'cache_target' and evicts entries from the LRU when above target
+    pub(crate) fn maybe_evict(&self, map_lock: &mut MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>) {
+        let min_capacity_limit = self.min_capacity_limit.load(Ordering::Relaxed);
+        let max_capacity_limit = self.max_capacity_limit.load(Ordering::Relaxed);
+        let max_cache_percent = self.max_cache_percent.load(Ordering::Relaxed);
+        let min_cache_percent = self.min_cache_percent.load(Ordering::Relaxed);
+        let capacity = map_lock.capacity();
+
+        // recalculate the cache_target
+        let countdown = self.target_countdown.load(Ordering::Relaxed);
+        if countdown > 0 {
+            // just keep counting down
+            self.target_countdown
+                .store(countdown - 1, Ordering::Relaxed)
+        } else {
+            self.target_countdown.store(
+                self.target_cooldown.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+
+            // linear interpolation between the min/max points
+            let cache_target = if capacity > max_capacity_limit {
+                min_cache_percent
+            } else if capacity < min_capacity_limit {
+                max_cache_percent
+            } else {
+                ((max_cache_percent as usize * (max_capacity_limit - capacity)
+                    + min_cache_percent as usize * (capacity - min_capacity_limit))
+                    / (max_capacity_limit - min_capacity_limit)) as u8
+            };
+            self.cache_target.store(cache_target, Ordering::Relaxed);
+        }
+
+        let cached = self.cached.load(Ordering::Relaxed);
+        let percent_cached = if capacity > 0 {
+            (cached * 100 / capacity) as u8
+        } else {
+            0
+        };
+
+        if capacity > min_capacity_limit
+            && percent_cached > self.cache_target.load(Ordering::Relaxed)
+        {
+            // lets evict some entries
+            self.evict(self.evict_batch.load(Ordering::Relaxed) as usize, map_lock);
+        }
+    }
+
     /// evicts up to 'n' entries from the LRU list. Returns the number of evicted entries which
     /// may be less than 'n' in case the list got depleted.
     pub fn evict(

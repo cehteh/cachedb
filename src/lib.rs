@@ -207,55 +207,7 @@ where
                 let entry_ptr: *const Entry<K, V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).value.write() };
 
-                let min_capacity_limit = bucket.min_capacity_limit.load(Ordering::Relaxed);
-                let max_capacity_limit = bucket.max_capacity_limit.load(Ordering::Relaxed);
-                let max_cache_percent = bucket.max_cache_percent.load(Ordering::Relaxed);
-                let min_cache_percent = bucket.min_cache_percent.load(Ordering::Relaxed);
-                let capacity = map_lock.capacity();
-
-                // recalculate the cache_target
-                let countdown = bucket.target_countdown.load(Ordering::Relaxed);
-                if countdown > 0 {
-                    // just keep counting down
-                    bucket
-                        .target_countdown
-                        .store(countdown - 1, Ordering::Relaxed)
-                } else {
-                    bucket.target_countdown.store(
-                        bucket.target_cooldown.load(Ordering::Relaxed),
-                        Ordering::Relaxed,
-                    );
-
-                    // linear interpolation between the min/max points
-                    let cache_target = if capacity > max_capacity_limit {
-                        min_cache_percent
-                    } else if capacity < min_capacity_limit {
-                        max_cache_percent
-                    } else {
-                        ((max_cache_percent as usize * (max_capacity_limit - capacity)
-                            + min_cache_percent as usize * (capacity - min_capacity_limit))
-                            / (max_capacity_limit - min_capacity_limit))
-                            as u8
-                    };
-                    bucket.cache_target.store(cache_target, Ordering::Relaxed);
-                }
-
-                let cached = bucket.cached.load(Ordering::Relaxed);
-                let percent_cached = if capacity > 0 {
-                    (cached * 100 / (capacity)) as u8
-                } else {
-                    0
-                };
-
-                if capacity > min_capacity_limit
-                    && percent_cached > bucket.cache_target.load(Ordering::Relaxed)
-                {
-                    // lets evict some entries
-                    bucket.evict(
-                        bucket.evict_batch.load(Ordering::Relaxed) as usize,
-                        &mut map_lock,
-                    );
-                }
+                bucket.maybe_evict(&mut map_lock);
 
                 // insert the entry into the bucket
                 #[cfg(feature = "logging")]
@@ -273,6 +225,57 @@ where
                     bucket,
                     entry: unsafe { &*entry_ptr },
                     guard: RwLockWriteGuard::downgrade(wguard),
+                })
+            }
+        }
+    }
+
+    /// Query an Entry for writing or construct it (atomically)
+    pub fn get_or_insert_mut<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryWriteGuard<K, V, N>>
+    where
+        F: FnOnce(&K) -> Result<V>,
+    {
+        let bucket = &self.buckets[key.bucket::<N>()];
+        let mut map_lock = bucket.lock_map();
+
+        match map_lock.get(key) {
+            Some(entry) => {
+                bucket.use_entry(entry);
+                // Entry exists, return a locked ReadGuard to it
+                let entry_ptr: *const Entry<K, V> = &**entry;
+                #[cfg(feature = "logging")]
+                trace!("write lock (existing): {:?}", key);
+                Ok(EntryWriteGuard {
+                    bucket,
+                    entry: unsafe { &*entry_ptr },
+                    guard: unsafe { (*entry_ptr).value.write() },
+                })
+            }
+            None => {
+                // Entry does not exist, we create an empty (data == None) entry and holding a
+                // write lock on it
+                let new_entry = Box::pin(Entry::new(key.clone()));
+                let entry_ptr: *const Entry<K, V> = &*new_entry;
+                let mut wguard = unsafe { (*entry_ptr).value.write() };
+
+                bucket.maybe_evict(&mut map_lock);
+
+                // insert the entry into the bucket
+                #[cfg(feature = "logging")]
+                trace!("create for reading: {:?}", &key);
+                map_lock.insert(new_entry);
+
+                // release the map_lock, we dont need it anymore
+                drop(map_lock);
+
+                // but we have wguard here which allows us to constuct the inner guts
+                *wguard = Some(ctor(key)?);
+
+                // Finally downgrade the lock to a readlock and return the Entry
+                Ok(EntryWriteGuard {
+                    bucket,
+                    entry: unsafe { &*entry_ptr },
+                    guard: wguard,
                 })
             }
         }
@@ -463,6 +466,21 @@ mod test {
             .unwrap();
 
         *cdb.get_mut(&"foo".to_string()).unwrap() = "baz".to_string();
+        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "baz".to_string());
+    }
+
+    #[test]
+    fn insert_mutate() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        let mut foo = cdb
+            .get_or_insert_mut(&"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+        assert_eq!(*foo, "bar".to_string());
+        *foo = "baz".to_string();
+        assert_eq!(*foo, "baz".to_string());
+        drop(foo);
         assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "baz".to_string());
     }
 
