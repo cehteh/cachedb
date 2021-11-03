@@ -23,7 +23,7 @@ use crate::UnsafeRef;
 /// hash map and some configuration variables. Every 'target_cooldown' inserts the
 /// 'cache_target' is recalcuated. As long the capacity is below 'min_capacity_limit' cache
 /// just fills up. Between 'min_capacity_limit' and 'max_capacity_limit' the 'cache_target' is
-/// linearly interpolated between 'max_cache_limit' and 'min_cache_limit', thus allowing a
+/// linearly interpolated between 'max_cache_percent' and 'min_cache_percent', thus allowing a
 /// high cache ratio when memory requirements are modest and reduce the memory usage for
 /// caching at higher memory loads. When the cached entries exceed the 'cache_target' up to
 /// 'evict_batch' entries are removed from the cache.
@@ -46,8 +46,8 @@ where
 
     pub(crate) max_capacity_limit: AtomicUsize,
     pub(crate) min_capacity_limit: AtomicUsize,
-    pub(crate) max_cache_limit:    AtomicU8,
-    pub(crate) min_cache_limit:    AtomicU8,
+    pub(crate) max_cache_percent:  AtomicU8,
+    pub(crate) min_cache_percent:  AtomicU8,
 
     pub(crate) evict_batch: AtomicU8,
 }
@@ -66,8 +66,8 @@ where
             target_cooldown:    AtomicU32::new(100),
             max_capacity_limit: AtomicUsize::new(10000000),
             min_capacity_limit: AtomicUsize::new(1000),
-            max_cache_limit:    AtomicU8::new(60),
-            min_cache_limit:    AtomicU8::new(5),
+            max_cache_percent:  AtomicU8::new(60),
+            min_cache_percent:  AtomicU8::new(5),
             evict_batch:        AtomicU8::new(16),
         }
     }

@@ -190,8 +190,8 @@ where
 
                 let min_capacity_limit = bucket.min_capacity_limit.load(Ordering::Relaxed);
                 let max_capacity_limit = bucket.max_capacity_limit.load(Ordering::Relaxed);
-                let max_cache_limit = bucket.max_cache_limit.load(Ordering::Relaxed);
-                let min_cache_limit = bucket.min_cache_limit.load(Ordering::Relaxed);
+                let max_cache_percent = bucket.max_cache_percent.load(Ordering::Relaxed);
+                let min_cache_percent = bucket.min_cache_percent.load(Ordering::Relaxed);
                 let capacity = map_lock.capacity();
 
                 // recalculate the cache_target
@@ -209,12 +209,12 @@ where
 
                     // linear interpolation between the min/max points
                     let cache_target = if capacity > max_capacity_limit {
-                        min_cache_limit
+                        min_cache_percent
                     } else if capacity < min_capacity_limit {
-                        max_cache_limit
+                        max_cache_percent
                     } else {
-                        ((max_cache_limit as usize * (max_capacity_limit - capacity)
-                            + min_cache_limit as usize * (capacity - min_capacity_limit))
+                        ((max_cache_percent as usize * (max_capacity_limit - capacity)
+                            + min_cache_percent as usize * (capacity - min_capacity_limit))
                             / (max_capacity_limit - min_capacity_limit))
                             as u8
                     };
