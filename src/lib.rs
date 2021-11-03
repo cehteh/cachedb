@@ -144,7 +144,7 @@ where
         let map_lock = bucket.lock_map();
 
         map_lock.get(key).map(|entry| {
-            bucket.use_entry(entry, &map_lock);
+            bucket.use_entry(entry);
 
             let entry_ptr: *const Entry<K, V> = &**entry;
             #[cfg(feature = "logging")]
@@ -170,7 +170,7 @@ where
 
         match map_lock.get(key) {
             Some(entry) => {
-                bucket.use_entry(entry, &map_lock);
+                bucket.use_entry(entry);
                 // Entry exists, return a locked ReadGuard to it
                 let entry_ptr: *const Entry<K, V> = &**entry;
                 #[cfg(feature = "logging")]
@@ -188,20 +188,54 @@ where
                 let entry_ptr: *const Entry<K, V> = &*new_entry;
                 let mut wguard = unsafe { (*entry_ptr).value.write() };
 
-                // do the LRU stuff, maybe evict old entries
-                let maxused = bucket.update_maxused(&map_lock);
+                let min_capacity_limit = bucket.min_capacity_limit.load(Ordering::Relaxed);
+                let max_capacity_limit = bucket.max_capacity_limit.load(Ordering::Relaxed);
+                let max_cache_limit = bucket.max_cache_limit.load(Ordering::Relaxed);
+                let min_cache_limit = bucket.min_cache_limit.load(Ordering::Relaxed);
+                let capacity = map_lock.capacity();
 
-                if map_lock.len() == map_lock.capacity() {
-                    let cached = bucket.cached.load(Ordering::Relaxed);
-                    let percent_cached = (cached * 100 / (cached + maxused)) as u8;
+                // recalculate the cache_target
+                let countdown = bucket.target_countdown.load(Ordering::Relaxed);
+                if countdown > 0 {
+                    // just keep counting down
+                    bucket
+                        .target_countdown
+                        .store(countdown - 1, Ordering::Relaxed)
+                } else {
+                    bucket.target_countdown.store(
+                        bucket.target_cooldown.load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
 
-                    if percent_cached > bucket.cache_target.load(Ordering::Relaxed) {
-                        // ok lets evict some entries
-                        bucket.evict(
-                            bucket.evict_batch.load(Ordering::Relaxed) as usize,
-                            &mut map_lock,
-                        );
-                    }
+                    // linear interpolation between the min/max points
+                    let cache_target = if capacity > max_capacity_limit {
+                        min_cache_limit
+                    } else if capacity < min_capacity_limit {
+                        max_cache_limit
+                    } else {
+                        ((max_cache_limit as usize * (max_capacity_limit - capacity)
+                            + min_cache_limit as usize * (capacity - min_capacity_limit))
+                            / (max_capacity_limit - min_capacity_limit))
+                            as u8
+                    };
+                    bucket.cache_target.store(cache_target, Ordering::Relaxed);
+                }
+
+                let cached = bucket.cached.load(Ordering::Relaxed);
+                let percent_cached = if capacity > 0 {
+                    (cached * 100 / (capacity)) as u8
+                } else {
+                    0
+                };
+
+                if capacity > min_capacity_limit
+                    && percent_cached > bucket.cache_target.load(Ordering::Relaxed)
+                {
+                    // lets evict some entries
+                    bucket.evict(
+                        bucket.evict_batch.load(Ordering::Relaxed) as usize,
+                        &mut map_lock,
+                    );
                 }
 
                 // insert the entry into the bucket
@@ -279,6 +313,33 @@ mod test {
     }
 
     #[test]
+    fn insert_foobar_onebucket() {
+        init();
+        let cdb = CacheDb::<String, String, 1>::new();
+
+        assert!(
+            cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
+        assert!(
+            cdb.get_or_insert(&"bar".to_string(), |_| Ok("foo".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"bar".to_string()).unwrap(), "foo".to_string());
+        assert!(
+            cdb.get_or_insert(&"foo2".to_string(), |_| Ok("bar2".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"foo2".to_string()).unwrap(), "bar2".to_string());
+        assert!(
+            cdb.get_or_insert(&"bar2".to_string(), |_| Ok("foo2".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"bar2".to_string()).unwrap(), "foo2".to_string());
+    }
+
+    #[test]
     fn insert_foobar() {
         init();
         let cdb = CacheDb::<String, String, 16>::new();
@@ -288,12 +349,28 @@ mod test {
                 .is_ok()
         );
         assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
+        assert!(
+            cdb.get_or_insert(&"bar".to_string(), |_| Ok("foo".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"bar".to_string()).unwrap(), "foo".to_string());
+        assert!(
+            cdb.get_or_insert(&"foo2".to_string(), |_| Ok("bar2".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"foo2".to_string()).unwrap(), "bar2".to_string());
+        assert!(
+            cdb.get_or_insert(&"bar2".to_string(), |_| Ok("foo2".to_string()))
+                .is_ok()
+        );
+        assert_eq!(*cdb.get(&"bar2".to_string()).unwrap(), "foo2".to_string());
     }
 
     #[test]
     pub fn multithreaded_stress() {
+        const BUCKETS: usize = 64;
         init();
-        let cdb = Arc::new(CacheDb::<u16, u16, 64>::new());
+        let cdb = Arc::new(CacheDb::<u16, u16, BUCKETS>::new());
 
         let num_threads: usize = env::var("STRESS_THREADS")
             .unwrap_or("10".to_string())
@@ -324,35 +401,35 @@ mod test {
                     let mut rng = rand::thread_rng();
                     c.wait();
 
-                    let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, 64>>::new();
+                    let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, BUCKETS>>::new();
 
-                    for _ in 1..iterations {
+                    for _ in 0..iterations {
                         // r is the key we handle
                         let r = rng.gen_range(0..range);
                         // p is the probability of some operation
-                        let p = rng.gen_range(1..100);
+                        let p = rng.gen_range(0..100);
                         // w is the wait time to simulate thread work
                         let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
                         match locked.remove(&r) {
                             // thread had no lock stored, create a new entry
                             None => {
-                                if p <= 1 {
+                                if p == 0 {
                                     #[cfg(feature = "logging")]
                                     trace!("drop all stored locks");
                                     locked.clear();
-                                } else if p <= 15 {
+                                } else if p < 15 {
                                     // TODO: remove
-                                } else if p <= 30 {
+                                } else if p < 30 {
                                     // TODO: touch
-                                } else if p <= 50 {
+                                } else if p < 50 {
                                     #[cfg(feature = "logging")]
                                     trace!("get_or_insert {} and keep it", r);
                                     locked.insert(r, cdb.get_or_insert(&r, |_| Ok(!r)).unwrap());
-                                } else if p <= 55 {
+                                } else if p < 55 {
                                     // TODO: get_mut_or work
-                                } else if p <= 60 {
+                                } else if p < 60 {
                                     // TODO: work get_mut_or
-                                } else if p <= 80 {
+                                } else if p < 80 {
                                     #[cfg(feature = "logging")]
                                     trace!("get_or {} and then wait/work for {:?}", r, w);
                                     let lock = cdb.get_or_insert(&r, |_| Ok(!r)).unwrap();
@@ -369,7 +446,7 @@ mod test {
 
                             // locked already for reading, lets drop it
                             Some(read_guard) => {
-                                if p <= 95 {
+                                if p < 95 {
                                     #[cfg(feature = "logging")]
                                     trace!("unlock kept readguard {}", r);
                                     drop(read_guard);

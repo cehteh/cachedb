@@ -19,20 +19,14 @@ use crate::UnsafeRef;
 /// The LRU eviction is per bucket, this is most efficient and catches the corner cases where
 /// one bucket sees more entries than others.
 ///
-/// The eviction caclculation adapts itself and works as follows:
-///
-/// The maximum number of elements used is tracked. This maximum number becomes decreased by
-/// 'maxused/maxused_reduction+1' after 'max_cooldown' operations. The number of elements in
-/// the LRU list is known as well. These two values are used to determine how percent the
-/// cached part makes up. As long the hash table has free entries within its capacity things
-/// become cached. When the capacity is depleted it is checked if the percent cached items
-/// exceed the configured 'cache_target' percentage. If so, some 'evict_batch' entries are
-/// dropped, if not a new entry will just be added to the hashtable which will force it to grow.
-///
-/// The 'cache_target' percentage is calculated by to be between 'cache_max' to 'cache_min' by by
-/// linear interpolation from 'min_entries_limit' to 'max_entries_limit'. Thus allowing a high
-/// cache ratio when memory requirements are modest and reduce the memory usage for caching at
-/// higher memory loads.
+/// The eviction caclculation adapts itself based on the current capacity of the underlying
+/// hash map and some configuration variables. Every 'target_cooldown' inserts the
+/// 'cache_target' is recalcuated. As long the capacity is below 'min_capacity_limit' cache
+/// just fills up. Between 'min_capacity_limit' and 'max_capacity_limit' the 'cache_target' is
+/// linearly interpolated between 'max_cache_limit' and 'min_cache_limit', thus allowing a
+/// high cache ratio when memory requirements are modest and reduce the memory usage for
+/// caching at higher memory loads. When the cached entries exceed the 'cache_target' up to
+/// 'evict_batch' entries are removed from the cache.
 pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
@@ -42,20 +36,19 @@ where
 
     // Stats section
     pub(crate) cached: AtomicUsize,
-    maxused:           AtomicUsize,
 
     // State section
-    maxused_countdown:       AtomicU32,
-    pub(crate) cache_target: AtomicU8,
+    pub(crate) cache_target:     AtomicU8,
+    pub(crate) target_countdown: AtomicU32,
 
     // Configuration
-    pub(crate) maxused_cooldown:  AtomicU32,
-    pub(crate) maxused_reduction: AtomicUsize,
-    pub(crate) max_entries_limit: AtomicUsize,
-    pub(crate) min_entries_limit: AtomicUsize,
+    pub(crate) target_cooldown: AtomicU32,
 
-    pub(crate) cache_max:   AtomicU8,
-    pub(crate) cache_min:   AtomicU8,
+    pub(crate) max_capacity_limit: AtomicUsize,
+    pub(crate) min_capacity_limit: AtomicUsize,
+    pub(crate) max_cache_limit:    AtomicU8,
+    pub(crate) min_cache_limit:    AtomicU8,
+
     pub(crate) evict_batch: AtomicU8,
 }
 
@@ -65,19 +58,17 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            map:               Mutex::new(HashSet::new()),
-            lru_list:          Mutex::new(LinkedList::new(EntryAdapter::new())),
-            cached:            AtomicUsize::new(0),
-            maxused:           AtomicUsize::new(0),
-            maxused_countdown: AtomicU32::new(0),
-            cache_target:      AtomicU8::new(50),
-            maxused_cooldown:  AtomicU32::new(1000),
-            maxused_reduction: AtomicUsize::new(10000),
-            max_entries_limit: AtomicUsize::new(10000000),
-            min_entries_limit: AtomicUsize::new(1000),
-            cache_max:         AtomicU8::new(50),
-            cache_min:         AtomicU8::new(5),
-            evict_batch:       AtomicU8::new(16),
+            map:                Mutex::new(HashSet::new()),
+            lru_list:           Mutex::new(LinkedList::new(EntryAdapter::new())),
+            cached:             AtomicUsize::new(0),
+            cache_target:       AtomicU8::new(50),
+            target_countdown:   AtomicU32::new(0),
+            target_cooldown:    AtomicU32::new(100),
+            max_capacity_limit: AtomicUsize::new(10000000),
+            min_capacity_limit: AtomicUsize::new(1000),
+            max_cache_limit:    AtomicU8::new(60),
+            min_cache_limit:    AtomicU8::new(5),
+            evict_batch:        AtomicU8::new(16),
         }
     }
 
@@ -85,16 +76,11 @@ where
         self.map.lock()
     }
 
-    pub(crate) fn use_entry(
-        &self,
-        entry: &Entry<K, V>,
-        map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
-    ) {
+    pub(crate) fn use_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
             self.cached.fetch_sub(1, Ordering::Relaxed);
-            self.update_maxused(map_lock);
         }
         entry.use_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -105,43 +91,6 @@ where
             self.cached.fetch_add(1, Ordering::Relaxed);
             lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
         }
-    }
-
-    /// Updates the max used entry stat. This is called before creating a new entry, thus it
-    /// preempts this by adding one to the length queried from the map.
-    /// returns the adjusted 'maxused' value.
-    pub(crate) fn update_maxused(
-        &self,
-        map_lock: &MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,
-    ) -> usize {
-        // since we got the map locked we can be sloppy with atomics
-
-        let now_used = map_lock.len() + 1 - self.cached.load(Ordering::Relaxed);
-        // update maxused
-        self.maxused.fetch_max(now_used, Ordering::Relaxed);
-        let mut maxused = self.maxused.load(Ordering::Relaxed);
-
-        // maxused_countdown handling
-        let countdown = self.maxused_countdown.load(Ordering::Relaxed);
-        if countdown > 0 {
-            // just keep counting down
-            self.maxused_countdown
-                .store(countdown - 1, Ordering::Relaxed)
-        } else {
-            // Do some work, reset it to cooldown period, decrement maxused
-            self.maxused_countdown.store(
-                self.maxused_cooldown.load(Ordering::Relaxed),
-                Ordering::Relaxed,
-            );
-            if maxused > 0 && maxused != now_used {
-                maxused -= maxused / self.maxused_reduction.load(Ordering::Relaxed) + 1;
-                self.maxused.store(maxused, Ordering::Relaxed);
-            }
-
-            // TODO: recalculate low/highwater
-        }
-
-        maxused
     }
 
     /// evicts up to 'n' entries from the LRU list. Returns the number of evicted entries which
