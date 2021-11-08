@@ -359,6 +359,14 @@ where
             bucket.evict_batch.store(evict_batch, Ordering::Relaxed);
         }
     }
+
+    /// Evicts up to number entries. The implementation is pretty simple trying to evict number/N from
+    /// each bucket. Thus when the distribution is not optimal fewer elements will be removed.
+    pub fn evict(&self, number: usize) {
+        for bucket in &self.buckets {
+            bucket.evict(number / N, &mut bucket.lock_map());
+        }
+    }
 }
 
 impl<K, V, const N: usize> Default for CacheDb<K, V, N>
