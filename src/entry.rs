@@ -15,10 +15,10 @@ use crate::{bucket::Bucket, Bucketize};
 /// Collects the traits a Key must implement, any user defined Key type must implement this
 /// trait and any traits it derives from.
 /// The 'Debug' trait is only required when the feature 'logging' is enabled.
-#[cfg(feature = "logging")]
-pub trait KeyTraits: Eq + Clone + Bucketize + Debug {}
 #[cfg(not(feature = "logging"))]
 pub trait KeyTraits: Eq + Clone + Bucketize {}
+#[cfg(feature = "logging")]
+pub trait KeyTraits: Eq + Clone + Bucketize + Debug {}
 
 /// User data is stored behind RwLocks in an entry. Furthermore some management information
 /// like the LRU list node are stored here. Entries have stable addresses and can't be moved

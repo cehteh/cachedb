@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! In memory Key/Value store with LRU expire and concurrent access
 //!
 //!
@@ -96,7 +97,7 @@ use std::collections::HashSet;
 use std::pin::Pin;
 
 #[allow(unused_imports)]
-pub use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
 use parking_lot::{MutexGuard, RwLockWriteGuard};
 
