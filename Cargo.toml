@@ -1,12 +1,12 @@
 [package]
 name = "cachedb"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Christian Thäter <ct@pipapo.org>"]
 edition = "2021"
 description = "In memory Key/Value store that stores RwLock<Value> which expire in LRU order when unused"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cehteh/cachedb.git"
-keywords = ["collection", "cache"]
+keywords = ["collection", "cache", "concurrency"]
 
 [dependencies]
 parking_lot = "0.11"

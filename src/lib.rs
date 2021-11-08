@@ -90,20 +90,15 @@
 //! The default values are rather small to make the test suite complete in short time. For dedicated
 //! stress testing at least STRESS_ITERATIONS and STRESS_THREADS has to be incresed significantly.
 //! Try 'STRESS_ITERATIONS=10000 STRESS_RANGE=10000 STRESS_THREADS=10000' for some harder test.
-//!
-//!
-//! ISSUES
-//! ======
-//!
-//! * Until a full lock_transpose() which transfers locks automically becomes implemented,
-//!   waiting for a lock will block the whole bucket. This can be mitigated by finer grained
-//!   locking but a definitive solution would be the lock transpose.
+#![allow(clippy::type_complexity)]
 use std::sync::atomic::Ordering;
+use std::collections::HashSet;
+use std::pin::Pin;
 
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
-use parking_lot::RwLockWriteGuard;
+use parking_lot::{MutexGuard, RwLockWriteGuard};
 
 mod entry;
 use crate::entry::Entry;
@@ -112,7 +107,9 @@ pub use crate::entry::{EntryReadGuard, EntryWriteGuard, KeyTraits};
 mod bucket;
 use crate::bucket::Bucket;
 pub use crate::bucket::Bucketize;
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+mod locking_method;
+use crate::locking_method::*;
 
 /// CacheDb implements the concurrent (bucketed) Key/Value store.  Keys must implement
 /// 'Bucketize' which has more lax requirments than a full hash implmementation.  'N' is the
@@ -138,81 +135,105 @@ where
         }
     }
 
-    /// Query the Entry associated with key for reading
-    pub fn get<'a>(&'a self, key: &K) -> Option<EntryReadGuard<K, V, N>> {
+    /// queries an entry and detaches it from the LRU
+    fn query_entry(&self, key: &K) -> Result<(&Bucket<K, V>, *const Entry<K, V>), Error> {
         let bucket = &self.buckets[key.bucket::<N>()];
         let map_lock = bucket.lock_map();
 
-        map_lock.get(key).map(|entry| {
+        if let Some(entry) = map_lock.get(key) {
             bucket.use_entry(entry);
+            Ok((bucket, &**entry))
+        } else {
+            Err(Error::NoEntry)
+        }
+    }
 
-            let entry_ptr: *const Entry<K, V> = &**entry;
-            #[cfg(feature = "logging")]
-            trace!("read lock: {:?}", key);
-            EntryReadGuard {
-                bucket,
-                entry: unsafe { &*entry_ptr },
-                guard: unsafe { (*entry_ptr).value.read() },
-            }
+    /// Query the Entry associated with key for reading
+    /// the 'method' defines how entries are locked and can be one of:
+    ///   * Blocking: normal blocking lock, returns when the lock is acquired
+    ///   * TryLock: tries to lock the entry, returns 'Error::LockUnavailable'
+    ///     when the lock can't be obtained instantly.
+    ///   * Duration: tries to lock the entry with a timeout, returns 'Error::LockUnavailable'
+    ///     when the lock can't be obtained within this time.
+    ///   * Instant: tries to lock the entry until some point in time, returns 'Error::LockUnavailable'
+    ///     when the lock can't be obtained in time.
+    ///   All of the can be wraped in 'Recursive()' to allow a thread to relock any lock it already helds.
+    pub fn get<'a, M>(&'a self, method: M, key: &K) -> Result<EntryReadGuard<K, V, N>, Error>
+    where
+        M: 'a + LockingMethod<'a, V>,
+    {
+        let (bucket, entry_ptr) = self.query_entry(key)?;
+        Ok(EntryReadGuard {
+            bucket,
+            entry: unsafe { &*entry_ptr },
+            guard: unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? },
         })
     }
 
     /// Query the Entry associated with key for writing
-    pub fn get_mut<'a>(&'a self, key: &K) -> Option<EntryWriteGuard<K, V, N>> {
-        let bucket = &self.buckets[key.bucket::<N>()];
-        let map_lock = bucket.lock_map();
-
-        map_lock.get(key).map(|entry| {
-            bucket.use_entry(entry);
-
-            let entry_ptr: *const Entry<K, V> = &**entry;
-            #[cfg(feature = "logging")]
-            trace!("write lock: {:?}", key);
-            EntryWriteGuard {
-                bucket,
-                entry: unsafe { &*entry_ptr },
-                guard: unsafe { (*entry_ptr).value.write() },
-            }
+    pub fn get_mut<'a, M>(&'a self, method: M, key: &K) -> Result<EntryWriteGuard<K, V, N>, Error>
+    where
+        M: 'a + LockingMethod<'a, V>,
+    {
+        let (bucket, entry_ptr) = self.query_entry(key)?;
+        Ok(EntryWriteGuard {
+            bucket,
+            entry: unsafe { &*entry_ptr },
+            guard: unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? },
         })
+    }
+
+    // queries an entry and detaches it from the LRU or creates a new one
+    fn query_or_insert_entry(
+        &self,
+        key: &K,
+    ) -> std::result::Result<
+        (&Bucket<K, V>, *const Entry<K, V>),
+        (
+            &Bucket<K, V>,
+            *const Entry<K, V>,
+            MutexGuard<HashSet<Pin<Box<entry::Entry<K, V>>>>>,
+        ),
+    > {
+        let bucket = &self.buckets[key.bucket::<N>()];
+        let mut map_lock = bucket.lock_map();
+
+        if let Some(entry) = map_lock.get(key) {
+            bucket.use_entry(entry);
+            Ok((bucket, &**entry))
+        } else {
+            let entry = Box::pin(Entry::new(key.clone()));
+            let entry_ptr: *const Entry<K, V> = &*entry;
+            map_lock.insert(entry);
+            Err((bucket, entry_ptr, map_lock))
+        }
     }
 
     // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
     //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
     //       real ctor then.
     /// Query an Entry for reading or construct it (atomically)
-    pub fn get_or_insert<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryReadGuard<K, V, N>>
+    pub fn get_or_insert<'a, M, F>(
+        &'a self,
+        method: M,
+        key: &K,
+        ctor: F,
+    ) -> DynResult<EntryReadGuard<K, V, N>>
     where
-        F: FnOnce(&K) -> Result<V>,
+        F: FnOnce(&K) -> DynResult<V>,
+        M: 'a + LockingMethod<'a, V>,
     {
-        let bucket = &self.buckets[key.bucket::<N>()];
-        let mut map_lock = bucket.lock_map();
-
-        match map_lock.get(key) {
-            Some(entry) => {
-                bucket.use_entry(entry);
-                // Entry exists, return a locked ReadGuard to it
-                let entry_ptr: *const Entry<K, V> = &**entry;
-                #[cfg(feature = "logging")]
-                trace!("read lock (existing): {:?}", key);
-                Ok(EntryReadGuard {
-                    bucket,
-                    entry: unsafe { &*entry_ptr },
-                    guard: unsafe { (*entry_ptr).value.read() },
-                })
-            }
-            None => {
-                // Entry does not exist, we create an empty (data == None) entry and holding a
-                // write lock on it
-                let new_entry = Box::pin(Entry::new(key.clone()));
-                let entry_ptr: *const Entry<K, V> = &*new_entry;
-                let mut wguard = unsafe { (*entry_ptr).value.write() };
-
+        match self.query_or_insert_entry(key) {
+            Ok((bucket, entry_ptr)) => Ok(EntryReadGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? },
+            }),
+            Err((bucket, entry_ptr, mut map_lock)) => {
                 bucket.maybe_evict(&mut map_lock);
 
-                // insert the entry into the bucket
-                #[cfg(feature = "logging")]
-                trace!("create for reading: {:?}", &key);
-                map_lock.insert(new_entry);
+                // need write lock for the ctor, before releasing the map to avoid a race.
+                let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
@@ -231,39 +252,27 @@ where
     }
 
     /// Query an Entry for writing or construct it (atomically)
-    pub fn get_or_insert_mut<'a, F>(&'a self, key: &K, ctor: F) -> Result<EntryWriteGuard<K, V, N>>
+    pub fn get_or_insert_mut<'a, M, F>(
+        &'a self,
+        method: M,
+        key: &K,
+        ctor: F,
+    ) -> DynResult<EntryWriteGuard<K, V, N>>
     where
-        F: FnOnce(&K) -> Result<V>,
+        F: FnOnce(&K) -> DynResult<V>,
+        M: 'a + LockingMethod<'a, V>,
     {
-        let bucket = &self.buckets[key.bucket::<N>()];
-        let mut map_lock = bucket.lock_map();
-
-        match map_lock.get(key) {
-            Some(entry) => {
-                bucket.use_entry(entry);
-                // Entry exists, return a locked ReadGuard to it
-                let entry_ptr: *const Entry<K, V> = &**entry;
-                #[cfg(feature = "logging")]
-                trace!("write lock (existing): {:?}", key);
-                Ok(EntryWriteGuard {
-                    bucket,
-                    entry: unsafe { &*entry_ptr },
-                    guard: unsafe { (*entry_ptr).value.write() },
-                })
-            }
-            None => {
-                // Entry does not exist, we create an empty (data == None) entry and holding a
-                // write lock on it
-                let new_entry = Box::pin(Entry::new(key.clone()));
-                let entry_ptr: *const Entry<K, V> = &*new_entry;
-                let mut wguard = unsafe { (*entry_ptr).value.write() };
-
+        match self.query_or_insert_entry(key) {
+            Ok((bucket, entry_ptr)) => Ok(EntryWriteGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? },
+            }),
+            Err((bucket, entry_ptr, mut map_lock)) => {
                 bucket.maybe_evict(&mut map_lock);
 
-                // insert the entry into the bucket
-                #[cfg(feature = "logging")]
-                trace!("create for reading: {:?}", &key);
-                map_lock.insert(new_entry);
+                // need write lock for the ctor, before releasing the map to avoid a race.
+                let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
@@ -360,26 +369,67 @@ where
     }
 }
 
+/// Result type that boxes the error. Allows constructors to return arbitary errors.
+pub type DynResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// The errors that CacheDb implements itself. Note that the constructors can return other
+/// errors as well ('DynResult' is returned in those case).
+#[derive(Debug)]
+pub enum Error {
+    /// The Entry was not found
+    NoEntry,
+    /// Locking an entry failed
+    LockUnavailable,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NoEntry => write!(f, "Entry not found"),
+            Error::LockUnavailable => write!(f, "Trying to lock failed"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
     use std::env;
     use std::sync::{Arc, Barrier};
     use std::{thread, time};
-
+    use std::sync::atomic::AtomicU64;
     #[cfg(feature = "logging")]
-    use parking_lot::Once;
+    use std::io::Write;
+
     use rand::Rng;
 
     use crate::*;
 
     #[cfg(feature = "logging")]
-    static INIT: Once = Once::new();
-
     fn init() {
-        #[cfg(feature = "logging")]
-        INIT.call_once(|| env_logger::init());
+        let counter: AtomicU64 = AtomicU64::new(0);
+        let seq_num = move || counter.fetch_add(1, Ordering::SeqCst);
+
+        env_logger::Builder::from_default_env()
+            .format(move |buf, record| {
+                writeln!(
+                    buf,
+                    "{:0>12}: {:>5}: {}:{}: {}: {}",
+                    seq_num(),
+                    record.level().as_str(),
+                    record.file().unwrap_or(""),
+                    record.line().unwrap_or(0),
+                    std::thread::current().name().unwrap_or("UNKNOWN"),
+                    record.args()
+                )
+            })
+            .try_init();
     }
+
+    #[cfg(not(feature = "logging"))]
+    fn init() {}
 
     // using the default hash based implementation for tests here
     impl Bucketize for String {}
@@ -400,7 +450,7 @@ mod test {
         init();
         let cdb = CacheDb::<String, String, 16>::new();
 
-        assert!(cdb.get(&"foo".to_string()).is_none());
+        assert!(cdb.get(Blocking, &"foo".to_string()).is_err());
     }
 
     #[test]
@@ -409,25 +459,37 @@ mod test {
         let cdb = CacheDb::<String, String, 1>::new();
 
         assert!(
-            cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+            cdb.get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"foo".to_string()).unwrap(),
+            "bar".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"bar".to_string(), |_| Ok("foo".to_string()))
+            cdb.get_or_insert(Blocking, &"bar".to_string(), |_| Ok("foo".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"bar".to_string()).unwrap(), "foo".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"bar".to_string()).unwrap(),
+            "foo".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"foo2".to_string(), |_| Ok("bar2".to_string()))
+            cdb.get_or_insert(Blocking, &"foo2".to_string(), |_| Ok("bar2".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"foo2".to_string()).unwrap(), "bar2".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"foo2".to_string()).unwrap(),
+            "bar2".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"bar2".to_string(), |_| Ok("foo2".to_string()))
+            cdb.get_or_insert(Blocking, &"bar2".to_string(), |_| Ok("foo2".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"bar2".to_string()).unwrap(), "foo2".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"bar2".to_string()).unwrap(),
+            "foo2".to_string()
+        );
     }
 
     #[test]
@@ -436,25 +498,95 @@ mod test {
         let cdb = CacheDb::<String, String, 16>::new();
 
         assert!(
-            cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+            cdb.get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "bar".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"foo".to_string()).unwrap(),
+            "bar".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"bar".to_string(), |_| Ok("foo".to_string()))
+            cdb.get_or_insert(Blocking, &"bar".to_string(), |_| Ok("foo".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"bar".to_string()).unwrap(), "foo".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"bar".to_string()).unwrap(),
+            "foo".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"foo2".to_string(), |_| Ok("bar2".to_string()))
+            cdb.get_or_insert(Blocking, &"foo2".to_string(), |_| Ok("bar2".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"foo2".to_string()).unwrap(), "bar2".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"foo2".to_string()).unwrap(),
+            "bar2".to_string()
+        );
         assert!(
-            cdb.get_or_insert(&"bar2".to_string(), |_| Ok("foo2".to_string()))
+            cdb.get_or_insert(Blocking, &"bar2".to_string(), |_| Ok("foo2".to_string()))
                 .is_ok()
         );
-        assert_eq!(*cdb.get(&"bar2".to_string()).unwrap(), "foo2".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"bar2".to_string()).unwrap(),
+            "foo2".to_string()
+        );
+    }
+
+    #[test]
+    fn trylocks() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        assert!(
+            cdb.get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
+                .is_ok()
+        );
+        assert_eq!(
+            *cdb.get(TryLock, &"foo".to_string()).unwrap(),
+            "bar".to_string()
+        );
+        assert_eq!(
+            *cdb.get(Duration::from_millis(100), &"foo".to_string())
+                .unwrap(),
+            "bar".to_string()
+        );
+        assert_eq!(
+            *cdb.get(
+                Instant::now() + Duration::from_millis(100),
+                &"foo".to_string()
+            )
+            .unwrap(),
+            "bar".to_string()
+        );
+    }
+
+    #[test]
+    fn recursivelocks() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        assert!(
+            cdb.get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
+                .is_ok()
+        );
+
+        let l1 = cdb.get(Recursive(Blocking), &"foo".to_string()).unwrap();
+        assert_eq!(*l1, "bar".to_string());
+
+        let l2 = cdb.get(Recursive(TryLock), &"foo".to_string()).unwrap();
+        assert_eq!(*l2, "bar".to_string());
+
+        let l3 = cdb
+            .get(Recursive(Duration::from_millis(100)), &"foo".to_string())
+            .unwrap();
+        assert_eq!(*l3, "bar".to_string());
+
+        let l4 = cdb
+            .get(
+                Recursive(Instant::now() + Duration::from_millis(100)),
+                &"foo".to_string(),
+            )
+            .unwrap();
+        assert_eq!(*l4, "bar".to_string());
     }
 
     #[test]
@@ -462,11 +594,14 @@ mod test {
         init();
         let cdb = CacheDb::<String, String, 16>::new();
 
-        cdb.get_or_insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+        cdb.get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
             .unwrap();
 
-        *cdb.get_mut(&"foo".to_string()).unwrap() = "baz".to_string();
-        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "baz".to_string());
+        *cdb.get_mut(Blocking, &"foo".to_string()).unwrap() = "baz".to_string();
+        assert_eq!(
+            *cdb.get(Blocking, &"foo".to_string()).unwrap(),
+            "baz".to_string()
+        );
     }
 
     #[test]
@@ -475,13 +610,16 @@ mod test {
         let cdb = CacheDb::<String, String, 16>::new();
 
         let mut foo = cdb
-            .get_or_insert_mut(&"foo".to_string(), |_| Ok("bar".to_string()))
+            .get_or_insert_mut(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
             .unwrap();
         assert_eq!(*foo, "bar".to_string());
         *foo = "baz".to_string();
         assert_eq!(*foo, "baz".to_string());
         drop(foo);
-        assert_eq!(*cdb.get(&"foo".to_string()).unwrap(), "baz".to_string());
+        assert_eq!(
+            *cdb.get(Blocking, &"foo".to_string()).unwrap(),
+            "baz".to_string()
+        );
     }
 
     #[test]
@@ -509,74 +647,137 @@ mod test {
 
         let mut handles = Vec::with_capacity(num_threads);
         let barrier = Arc::new(Barrier::new(num_threads));
-        for _ in 0..num_threads {
+        for thread_num in 0..num_threads {
             let c = Arc::clone(&barrier);
             let cdb = Arc::clone(&cdb);
 
-            handles.push(thread::spawn(
-                // The per thread function
-                move || {
-                    let mut rng = rand::thread_rng();
-                    c.wait();
+            handles.push(
+                thread::Builder::new()
+                    .name(thread_num.to_string())
+                    .spawn(
+                        // The per thread function
+                        move || {
+                            let mut rng = rand::thread_rng();
+                            c.wait();
 
-                    let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, BUCKETS>>::new();
+                            let mut locked =
+                                HashMap::<u16, EntryReadGuard<u16, u16, BUCKETS>>::new();
+                            let mut maxlocked: u16 = 0;
 
-                    for _ in 0..iterations {
-                        // r is the key we handle
-                        let r = rng.gen_range(0..range);
-                        // p is the probability of some operation
-                        let p = rng.gen_range(0..100);
-                        // w is the wait time to simulate thread work
-                        let w = time::Duration::from_millis(rng.gen_range(0..wait_millis));
-                        match locked.remove(&r) {
-                            // thread had no lock stored, create a new entry
-                            None => {
-                                if p == 0 {
-                                    #[cfg(feature = "logging")]
-                                    trace!("drop all stored locks");
-                                    locked.clear();
-                                } else if p < 15 {
-                                    // TODO: remove
-                                } else if p < 30 {
-                                    // TODO: touch
-                                } else if p < 50 {
-                                    #[cfg(feature = "logging")]
-                                    trace!("get_or_insert {} and keep it", r);
-                                    locked.insert(r, cdb.get_or_insert(&r, |_| Ok(!r)).unwrap());
-                                } else if p < 55 {
-                                    // TODO: get_mut_or work
-                                } else if p < 60 {
-                                    // TODO: work get_mut_or
-                                } else if p < 80 {
-                                    #[cfg(feature = "logging")]
-                                    trace!("get_or {} and then wait/work for {:?}", r, w);
-                                    let lock = cdb.get_or_insert(&r, |_| Ok(!r)).unwrap();
-                                    thread::sleep(w);
-                                    drop(lock);
+                            for _ in 0..iterations {
+                                // r is the key we handle
+                                let r = rng.gen_range(0..range);
+                                // p is the probability of some operation
+                                let p = rng.gen_range(0..100);
+                                // w is the wait time to simulate thread work
+                                let w = if wait_millis > 0 {
+                                    Some(time::Duration::from_millis(rng.gen_range(0..wait_millis)))
                                 } else {
-                                    #[cfg(feature = "logging")]
-                                    trace!("wait/work for {:?} and then get_or {}", w, r);
-                                    thread::sleep(w);
-                                    let lock = cdb.get_or_insert(&r, |_| Ok(!r)).unwrap();
-                                    drop(lock);
-                                }
-                            }
+                                    None
+                                };
+                                match locked.remove(&r) {
+                                    // thread had no lock stored, create a new entry
+                                    None => {
+                                        if p < 15 {
+                                            // TODO: remove
+                                        } else if p < 30 {
+                                            // TODO: touch
+                                        } else if p < 50 {
+                                            // #[cfg(feature = "logging")]
+                                            // trace!("get_or_insert {} and keep it", r);
+                                            // locked.insert(
+                                            //     r,
+                                            //     cdb.get_or_insert(&r, |_| Ok(!r)).unwrap(),
+                                            // );
+                                            // #[cfg(feature = "logging")]
+                                            // trace!("got {}", r);
+                                        } else if p < 55 {
+                                            if r > maxlocked {
+                                                maxlocked = r;
+                                                #[cfg(feature = "logging")]
+                                                trace!(
+                                                    "get_or_insert_mut {} and then wait/work for {:?}",
+                                                    r,
+                                                    w
+                                                );
+                                                let lock =
+                                                    cdb.get_or_insert_mut(Duration::from_millis(500), &r, |_| Ok(!r));
+                                                #[cfg(feature = "logging")]
+                                                trace!("got {}", r);
+                                                if let Some(w) = w {
+                                                    thread::sleep(w)
+                                                }
+                                                drop(lock);
+                                            } else {
+                                                maxlocked = 0;
+                                                #[cfg(feature = "logging")]
+                                                trace!("drop all stored locks");
+                                                locked.clear();
+                                            }
+                                        } else if p < 60 {
+                                            #[cfg(feature = "logging")]
+                                            trace!(
+                                                "wait/work for {:?} and then get_or_insert_mut {}",
+                                                w,
+                                                r
+                                            );
+                                            if let Some(w) = w {
+                                                thread::sleep(w)
+                                            }
+                                            let lock =
+                                                cdb.get_or_insert_mut(Duration::from_millis(500), &r, |_| Ok(!r));
+                                            #[cfg(feature = "logging")]
+                                            trace!("got {}", r);
+                                            drop(lock);
+                                        } else if p < 80 {
+                                            #[cfg(feature = "logging")]
+                                            trace!(
+                                                "get_or_insert {} and then wait/work for {:?}",
+                                                r,
+                                                w
+                                            );
+                                            let lock = cdb.get_or_insert(Blocking, &r, |_| Ok(!r)).unwrap();
+                                            #[cfg(feature = "logging")]
+                                            trace!("got {}", r);
+                                            if let Some(w) = w {
+                                                thread::sleep(w)
+                                            }
+                                            drop(lock);
+                                        } else {
+                                            #[cfg(feature = "logging")]
+                                            trace!(
+                                                "wait/work for {:?} and then get_or_insert {}",
+                                                w,
+                                                r
+                                            );
+                                            if let Some(w) = w {
+                                                thread::sleep(w)
+                                            }
+                                            let lock = cdb.get_or_insert(Blocking, &r, |_| Ok(!r)).unwrap();
+                                            #[cfg(feature = "logging")]
+                                            trace!("got {}", r);
+                                            drop(lock);
+                                        }
+                                    }
 
-                            // locked already for reading, lets drop it
-                            Some(read_guard) => {
-                                if p < 95 {
-                                    #[cfg(feature = "logging")]
-                                    trace!("unlock kept readguard {}", r);
-                                    drop(read_guard);
-                                } else {
-                                    // TODO: drop-remove
-                                }
+                                    // locked already for reading, lets drop it
+                                    Some(read_guard) => {
+                                        if p < 95 {
+                                            #[cfg(feature = "logging")]
+                                            trace!("unlock kept readguard {}", r);
+                                            drop(read_guard);
+                                        } else {
+                                            // TODO: drop-remove
+                                            drop(read_guard);
+                                        }
+                                    }
+                                };
                             }
-                        };
-                    }
-                    drop(locked);
-                },
-            ));
+                            drop(locked);
+                        },
+                    )
+                    .unwrap(),
+            );
         }
 
         // TODO: finally assert that nothing is locked
