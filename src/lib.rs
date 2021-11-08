@@ -426,7 +426,8 @@ mod test {
                     record.args()
                 )
             })
-            .try_init();
+            .try_init()
+            .unwrap();
     }
 
     #[cfg(not(feature = "logging"))]

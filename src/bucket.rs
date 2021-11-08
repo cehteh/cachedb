@@ -83,13 +83,19 @@ where
             self.cached.fetch_sub(1, Ordering::Relaxed);
         }
         entry.use_count.fetch_add(1, Ordering::Relaxed);
+        entry.expire.store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn unuse_entry(&self, entry: &Entry<K, V>) {
         let mut lru_lock = self.lru_list.lock();
+
         if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.cached.fetch_add(1, Ordering::Relaxed);
-            lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+            if !entry.expire.load(Ordering::Relaxed) {
+                lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+            } else {
+                lru_lock.push_front(unsafe { UnsafeRef::from_raw(entry) });
+            }
         }
     }
 

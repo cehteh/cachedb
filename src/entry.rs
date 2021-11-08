@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "logging")]
 use std::fmt::Debug;
 use std::marker::PhantomPinned;
@@ -24,12 +24,12 @@ pub trait KeyTraits: Eq + Clone + Bucketize + Debug {}
 /// like the LRU list node are stored here. Entries have stable addresses and can't be moved
 /// in memory.
 pub(crate) struct Entry<K, V> {
-    // PLANNED: implement atomic lock transititon between two locks (as is, waiting on the rwlock will block the hashmap)
-    // The Option is only used for delaying the construction.
     pub(crate) key:       K,
+    // The Option is only used for delaying the construction with write lock held.
     pub(crate) value:     RwLock<Option<V>>,
     pub(crate) lru_link:  LinkedListLink, // protected by lru_list mutex
     pub(crate) use_count: AtomicUsize,
+    pub(crate) expire:    AtomicBool,
     _pin:                 PhantomPinned,
 }
 
@@ -42,6 +42,7 @@ impl<K: KeyTraits, V> Entry<K, V> {
             value: RwLock::new(None),
             lru_link: LinkedListLink::new(),
             use_count: AtomicUsize::new(1),
+            expire: AtomicBool::new(false),
             _pin: PhantomPinned,
         }
     }
@@ -83,6 +84,18 @@ where
     pub(crate) guard:  RwLockReadGuard<'a, Option<V>>,
 }
 
+impl<'a, K, V, const N: usize> EntryReadGuard<'_, K, V, N>
+where
+    K: KeyTraits,
+{
+    /// Mark the entry for expiration. When dropped it will be put in front of the LRU list
+    /// and by that evicted soon. Use with care, when many entries become pushed to the front,
+    /// they eventually bubble up again.
+    fn expire(&mut self) {
+        self.entry.expire.store(true, Ordering::Relaxed);
+    }
+}
+
 impl<'a, K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
 where
     K: KeyTraits,
@@ -112,6 +125,18 @@ where
     pub(crate) bucket: &'a Bucket<K, V>,
     pub(crate) entry:  &'a Entry<K, V>,
     pub(crate) guard:  RwLockWriteGuard<'a, Option<V>>,
+}
+
+impl<'a, K, V, const N: usize> EntryWriteGuard<'_, K, V, N>
+where
+    K: KeyTraits,
+{
+    /// Mark the entry for expiration. When dropped it will be put in front of the LRU list
+    /// and by that evicted soon. Use with care, when many entries become pushed to the front,
+    /// they eventually bubble up again.
+    fn expire(&mut self) {
+        self.entry.expire.store(true, Ordering::Relaxed);
+    }
 }
 
 impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
