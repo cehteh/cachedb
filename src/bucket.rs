@@ -3,6 +3,7 @@ use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::fmt::{self, Debug, Formatter};
 
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
@@ -165,6 +166,38 @@ where
             }
         }
         n
+    }
+}
+
+impl<K, V> Debug for Bucket<K, V>
+where
+    K: KeyTraits,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let map_lock = self.lock_map();
+        f.debug_struct("Bucket")
+            .field("map.len()", &map_lock.len())
+            .field("map.capacity()", &map_lock.capacity())
+            .field("cached", &self.cached.load(Ordering::Relaxed))
+            .field("cache_target", &self.cache_target.load(Ordering::Relaxed))
+            .field(
+                "max_capacity_limit",
+                &self.max_capacity_limit.load(Ordering::Relaxed),
+            )
+            .field(
+                "min_capacity_limit",
+                &self.min_capacity_limit.load(Ordering::Relaxed),
+            )
+            .field(
+                "max_cache_percent",
+                &self.max_cache_percent.load(Ordering::Relaxed),
+            )
+            .field(
+                "min_cache_percent",
+                &self.min_cache_percent.load(Ordering::Relaxed),
+            )
+            .field("evict_batch", &self.evict_batch.load(Ordering::Relaxed))
+            .finish()
     }
 }
 

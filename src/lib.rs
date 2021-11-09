@@ -118,6 +118,7 @@ use crate::locking_method::*;
 /// overhead.  Buckets by themself are not very expensive thus it is recommended to use a
 /// generous large enough number here.  Think about expected number of concurrenct accesses
 /// times four.
+#[derive(Debug)]
 pub struct CacheDb<K, V, const N: usize>
 where
     K: KeyTraits,
@@ -460,6 +461,7 @@ mod test {
         init();
         let cdb = CacheDb::<String, String, 16>::new();
 
+        println!("Debug {:?}", &cdb);
         assert!(cdb.get(Blocking, &"foo".to_string()).is_err());
     }
 
