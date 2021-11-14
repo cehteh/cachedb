@@ -344,6 +344,14 @@ where
         self
     }
 
+    /// Checks if the CacheDb has the given key stored. Note that this will have a race
+    /// condition when other threads access the CacheDb at the same time but may make sense
+    /// when lru_eviction is disabled and it can be ensure that no other thread inserts the
+    /// key.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.buckets[key.bucket::<N>()].lock_map().contains(key)
+    }
+
     /// The 'cache_target' will only recalculated after this many inserts. Should be in the
     /// lower hundreds.
     pub fn config_target_cooldown(&self, target_cooldown: u32) -> &Self {
@@ -607,6 +615,22 @@ mod test {
             *cdb.get(Blocking, &"bar2".to_string()).unwrap(),
             "foo2".to_string()
         );
+    }
+
+    #[test]
+    fn insert_unit() {
+        init();
+        let cdb = CacheDb::<String, (), 16>::new();
+
+        assert!(cdb.insert(&"foo".to_string(), |_| Ok(())).is_ok());
+        assert_eq!(*cdb.get(Blocking, &"foo".to_string()).unwrap(), ());
+
+        assert!(cdb.insert(&"bar".to_string(), |_| Ok(())).is_ok());
+        assert_eq!(*cdb.get(Blocking, &"bar".to_string()).unwrap(), ());
+
+        assert_eq!(cdb.contains_key(&"foo".to_string()), true);
+        assert_eq!(cdb.contains_key(&"bar".to_string()), true);
+        assert_eq!(cdb.contains_key(&"baz".to_string()), false);
     }
 
     #[test]
