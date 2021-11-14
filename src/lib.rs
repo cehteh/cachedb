@@ -239,7 +239,8 @@ where
                 }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
-                let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
+                let mut wguard =
+                    unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap() };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
@@ -280,7 +281,8 @@ where
                 }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
-                let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
+                let mut wguard =
+                    unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap() };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
