@@ -213,6 +213,34 @@ where
         }
     }
 
+    /// Tries to insert an entry with the given constructor.  Returns Ok(true) when the
+    /// constructor was called, Ok(false) when and item is already present under the given key
+    /// or some Err() in case the constructor failed.
+    pub fn insert<'a, F>(&'a self, key: &K, ctor: F) -> DynResult<bool>
+    where
+        F: FnOnce(&K) -> DynResult<V>,
+    {
+        match self.query_or_insert_entry(key) {
+            Ok(_) => Ok(false),
+            Err((bucket, entry_ptr, mut map_lock)) => {
+                if self.lru_disabled.load(Ordering::Relaxed) == 0 {
+                    bucket.maybe_evict(&mut map_lock);
+                }
+
+                // need write lock for the ctor, before releasing the map to avoid a race.
+                let mut wguard = unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value)? };
+
+                // release the map_lock, we dont need it anymore
+                drop(map_lock);
+
+                // but we have wguard here which allows us to constuct the inner guts
+                *wguard = Some(ctor(key)?);
+
+                Ok(true)
+            }
+        }
+    }
+
     // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
     //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
     //       real ctor then.
