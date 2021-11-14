@@ -150,7 +150,7 @@ where
 
     /// evicts up to 'n' entries from the LRU list. Returns the number of evicted entries which
     /// may be less than 'n' in case the list got depleted.
-    pub fn evict(
+    pub(crate) fn evict(
         &self,
         n: usize,
         map_lock: &mut MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>,

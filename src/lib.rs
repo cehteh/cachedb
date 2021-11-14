@@ -92,7 +92,7 @@
 //! stress testing at least STRESS_ITERATIONS and STRESS_THREADS has to be incresed significantly.
 //! Try 'STRESS_ITERATIONS=10000 STRESS_RANGE=10000 STRESS_THREADS=10000' for some harder test.
 #![allow(clippy::type_complexity)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashSet;
 use std::pin::Pin;
 
@@ -123,7 +123,8 @@ pub struct CacheDb<K, V, const N: usize>
 where
     K: KeyTraits,
 {
-    buckets: [Bucket<K, V>; N],
+    buckets:      [Bucket<K, V>; N],
+    lru_disabled: AtomicU32,
 }
 
 impl<K, V, const N: usize> CacheDb<K, V, N>
@@ -133,7 +134,8 @@ where
     /// Create a new CacheDb
     pub fn new() -> CacheDb<K, V, N> {
         CacheDb {
-            buckets: [(); N].map(|()| Bucket::new()),
+            buckets:      [(); N].map(|()| Bucket::new()),
+            lru_disabled: AtomicU32::new(0),
         }
     }
 
@@ -232,7 +234,9 @@ where
                 guard: unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? },
             }),
             Err((bucket, entry_ptr, mut map_lock)) => {
-                bucket.maybe_evict(&mut map_lock);
+                if self.lru_disabled.load(Ordering::Relaxed) == 0 {
+                    bucket.maybe_evict(&mut map_lock);
+                }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
                 let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
@@ -271,7 +275,9 @@ where
                 guard: unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? },
             }),
             Err((bucket, entry_ptr, mut map_lock)) => {
-                bucket.maybe_evict(&mut map_lock);
+                if self.lru_disabled.load(Ordering::Relaxed) == 0 {
+                    bucket.maybe_evict(&mut map_lock);
+                }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
                 let mut wguard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
@@ -290,6 +296,22 @@ where
                 })
             }
         }
+    }
+
+    /// Disable the LRU eviction. Can be called multiple times, every call should be paired
+    /// with a 'enable_lru()' call to reenable the LRU finally. Failing to do so may keep the
+    /// CacheDb filling up forever. However this might be intentional to disable the LRU
+    /// expiration entirely.
+    pub fn disable_lru_eviction(&self) -> &Self {
+        self.lru_disabled.fetch_add(1, Ordering::Relaxed);
+        self
+    }
+
+    /// Re-Enables the LRU eviction after it was disabled. every call must be preceeded by a call to
+    /// 'disable_lru()'. Calling it without an matching 'disable_lru()' will panic with an integer underflow.
+    pub fn enable_lru_eviction(&self) -> &Self {
+        self.lru_disabled.fetch_sub(1, Ordering::Relaxed);
+        self
     }
 
     /// The 'cache_target' will only recalculated after this many inserts. Should be in the
@@ -369,13 +391,18 @@ where
 
     /// Evicts up to number entries. The implementation is pretty simple trying to evict number/N from
     /// each bucket. Thus when the distribution is not optimal fewer elements will be removed.
-    /// Returns the number of items that got evicted
+    /// Will not remove any entries when the lru eviction is disabled.
+    /// Returns the number of items that got evicted.
     pub fn evict(&self, number: usize) -> usize {
-        let mut evicted = number;
-        for bucket in &self.buckets {
-            evicted -= bucket.evict(number / N, &mut bucket.lock_map());
+        if self.lru_disabled.load(Ordering::Relaxed) == 0 {
+            let mut evicted = number;
+            for bucket in &self.buckets {
+                evicted -= bucket.evict(number / N, &mut bucket.lock_map());
+            }
+            evicted
+        } else {
+            0
         }
-        evicted
     }
 }
 
