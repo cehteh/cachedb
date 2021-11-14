@@ -1,6 +1,6 @@
 [package]
 name = "cachedb"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Christian Thäter <ct@pipapo.org>"]
 edition = "2021"
 description = "In memory Key/Value store that stores RwLock<Value> which expire in LRU order when unused"
