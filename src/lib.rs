@@ -110,7 +110,7 @@ use crate::bucket::Bucket;
 pub use crate::bucket::Bucketize;
 
 mod locking_method;
-use crate::locking_method::*;
+pub use crate::locking_method::*;
 
 /// CacheDb implements the concurrent (bucketed) Key/Value store.  Keys must implement
 /// 'Bucketize' which has more lax requirments than a full hash implmementation.  'N' is the

@@ -5,26 +5,35 @@ pub use std::time::{Duration, Instant};
 
 use crate::Error;
 
-/// Blocking waits until the lock is obtained.
+/// Marker for blocking locks
 pub struct Blocking;
-/// Try to lock or return an error if the lock is not available.
+
+/// Marker for try-locks
 pub struct TryLock;
-/// Allows a thread to lock a single RwLock multiple times.
+
+/// Marker for recursive locking. Allows to obtain a read-lock multiple times by a single
+/// thread.  Note that write locks will fall back to non recursive locking and may deadlock
+/// when tried to be obtained recursively.
 pub struct Recursive<T>(pub T);
+
 // PLANNED: Async<T>(pub T)
 
-/// The locking methods for reading
+/// Trait for implementing read/write flavors of locking methods.
 pub trait LockingMethod<'a, V> {
+    // Obtain a read lock.
     fn read(
         &self,
         rwlock: &'a parking_lot::RwLock<Option<V>>,
     ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error>;
+
+    // Obtain a write lock.
     fn write(
         &self,
         rwlock: &'a parking_lot::RwLock<Option<V>>,
     ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error>;
 }
 
+/// The 'normal' blocking lock. Waits until the Lock becomes available.
 impl<'a, V> LockingMethod<'a, V> for Blocking {
     #[inline(always)]
     fn read(
@@ -43,6 +52,7 @@ impl<'a, V> LockingMethod<'a, V> for Blocking {
     }
 }
 
+/// Tries to lock. Will error with 'LockUnavailable' when the lock can't be obtained.
 impl<'a, V> LockingMethod<'a, V> for TryLock {
     #[inline(always)]
     fn read(
