@@ -216,7 +216,7 @@ where
     /// Tries to insert an entry with the given constructor.  Returns Ok(true) when the
     /// constructor was called, Ok(false) when and item is already present under the given key
     /// or some Err() in case the constructor failed.
-    pub fn insert<'a, F>(&'a self, key: &K, ctor: F) -> DynResult<bool>
+    pub fn insert<F>(&self, key: &K, ctor: F) -> DynResult<bool>
     where
         F: FnOnce(&K) -> DynResult<V>,
     {
