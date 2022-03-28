@@ -11,7 +11,7 @@ repository = "https://github.com/cehteh/cachedb.git"
 keywords = ["collection", "cache", "concurrency"]
 
 [dependencies]
-parking_lot = "0.11"
+parking_lot = ">= 0.11, <=0.12"
 log = "0.4"
 intrusive-collections = "0.9"
 
