@@ -1,20 +1,27 @@
 //! There are plenty flavors on how a lock can be obtained. The normal blocking way, trying to
 //! obtain a lock, possibly with timeouts, allow a thread to lock a single RwLock multiple
 //! times. These are (zero-cost) abstracted here.
+
 pub use std::time::{Duration, Instant};
 
 use crate::Error;
 
-/// Marker for blocking locks
+/// Marker for blocking locks,
+/// waits until the Lock becomes available.
 pub struct Blocking;
 
-/// Marker for try-locks
+/// Marker for trying locks,
+/// will error with 'LockUnavailable' when the lock can't be obtained.
 pub struct TryLock;
 
 /// Marker for recursive locking. Allows to obtain a read-lock multiple times by a single
 /// thread.  Note that write locks will fall back to non recursive locking and may deadlock
 /// when tried to be obtained recursively.
 pub struct Recursive<T>(pub T);
+
+// FIXME: how to generate Doc for Duration and Instant
+// Tries to obtain the lock within a timeout.
+// Tries to obtain the lock until a target time expired.
 
 // PLANNED: Async<T>(pub T)
 
@@ -33,154 +40,106 @@ pub trait LockingMethod<'a, V> {
     ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error>;
 }
 
-/// The 'normal' blocking lock. Waits until the Lock becomes available.
-impl<'a, V> LockingMethod<'a, V> for Blocking {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        Ok(rwlock.read())
-    }
+macro_rules! impl_locking_method {
+    ($policy:ty, $read:expr, $write:expr) => {
+        impl<'a, V> LockingMethod<'a, V> for $policy {
+            #[inline(always)]
+            fn read(
+                &self,
+                rwlock: &'a parking_lot::RwLock<Option<V>>,
+            ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
+                #[allow(unused_macros)]
+                macro_rules! method {
+                    () => {
+                        self
+                    };
+                }
+                macro_rules! lock {
+                    () => {
+                        rwlock
+                    };
+                }
+                $read
+            }
 
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        Ok(rwlock.write())
-    }
+            #[inline(always)]
+            fn write(
+                &self,
+                rwlock: &'a parking_lot::RwLock<Option<V>>,
+            ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
+                #[allow(unused_macros)]
+                macro_rules! method {
+                    () => {
+                        self
+                    };
+                }
+                macro_rules! lock {
+                    () => {
+                        rwlock
+                    };
+                }
+                $write
+            }
+        }
+    };
 }
 
-/// Tries to lock. Will error with 'LockUnavailable' when the lock can't be obtained.
-impl<'a, V> LockingMethod<'a, V> for TryLock {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock.try_read().ok_or(Error::LockUnavailable)
-    }
+impl_locking_method!(Blocking, Ok(lock!().read()), Ok(lock!().write()));
 
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write().ok_or(Error::LockUnavailable)
-    }
-}
+impl_locking_method!(
+    TryLock,
+    lock!().try_read().ok_or(Error::LockUnavailable),
+    lock!().try_write().ok_or(Error::LockUnavailable)
+);
 
-/// Tries to obtain the lock within a timeout.
-impl<'a, V> LockingMethod<'a, V> for Duration {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock.try_read_for(*self).ok_or(Error::LockUnavailable)
-    }
+impl_locking_method!(
+    Duration,
+    lock!()
+        .try_read_for(*method!())
+        .ok_or(Error::LockUnavailable),
+    lock!()
+        .try_write_for(*method!())
+        .ok_or(Error::LockUnavailable)
+);
 
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write_for(*self).ok_or(Error::LockUnavailable)
-    }
-}
+impl_locking_method!(
+    Instant,
+    lock!()
+        .try_read_until(*method!())
+        .ok_or(Error::LockUnavailable),
+    lock!()
+        .try_write_until(*method!())
+        .ok_or(Error::LockUnavailable)
+);
 
-/// Tries to obtain the lock until a target time expired.
-impl<'a, V> LockingMethod<'a, V> for Instant {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock.try_read_until(*self).ok_or(Error::LockUnavailable)
-    }
+impl_locking_method!(
+    Recursive<Blocking>,
+    Ok(lock!().read_recursive()),
+    Ok(lock!().write())
+);
 
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write_until(*self).ok_or(Error::LockUnavailable)
-    }
-}
+impl_locking_method!(
+    Recursive<TryLock>,
+    lock!().try_read_recursive().ok_or(Error::LockUnavailable),
+    lock!().try_write().ok_or(Error::LockUnavailable)
+);
 
-impl<'a, V> LockingMethod<'a, V> for Recursive<Blocking> {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        Ok(rwlock.read_recursive())
-    }
+impl_locking_method!(
+    Recursive<Duration>,
+    lock!()
+        .try_read_recursive_for(method!().0)
+        .ok_or(Error::LockUnavailable),
+    lock!()
+        .try_write_for(method!().0)
+        .ok_or(Error::LockUnavailable)
+);
 
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        Ok(rwlock.write())
-    }
-}
-
-impl<'a, V> LockingMethod<'a, V> for Recursive<TryLock> {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock.try_read_recursive().ok_or(Error::LockUnavailable)
-    }
-
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write().ok_or(Error::LockUnavailable)
-    }
-}
-
-impl<'a, V> LockingMethod<'a, V> for Recursive<Duration> {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock
-            .try_read_recursive_for(self.0)
-            .ok_or(Error::LockUnavailable)
-    }
-
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write_for(self.0).ok_or(Error::LockUnavailable)
-    }
-}
-
-impl<'a, V> LockingMethod<'a, V> for Recursive<Instant> {
-    #[inline(always)]
-    fn read(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockReadGuard<'a, Option<V>>, Error> {
-        rwlock
-            .try_read_recursive_until(self.0)
-            .ok_or(Error::LockUnavailable)
-    }
-
-    #[inline(always)]
-    fn write(
-        &self,
-        rwlock: &'a parking_lot::RwLock<Option<V>>,
-    ) -> Result<parking_lot::RwLockWriteGuard<'a, Option<V>>, Error> {
-        rwlock.try_write_until(self.0).ok_or(Error::LockUnavailable)
-    }
-}
+impl_locking_method!(
+    Recursive<Instant>,
+    lock!()
+        .try_read_recursive_until(method!().0)
+        .ok_or(Error::LockUnavailable),
+    lock!()
+        .try_write_until(method!().0)
+        .ok_or(Error::LockUnavailable)
+);
