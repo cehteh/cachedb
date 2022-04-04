@@ -352,6 +352,22 @@ where
         self.buckets[key.bucket::<N>()].lock_map().contains(key)
     }
 
+    /// Get some basic stats about utilization.  Returns a tuple if `(capacity, len, cached)`
+    /// summed from all buckets.  The result are approximate values because other threads may
+    /// modify the underlying cache at the same time.
+    pub fn stats(&self) -> (usize, usize, usize) {
+        let mut capacity: usize = 0;
+        let mut len: usize = 0;
+        let mut cached: usize = 0;
+        for bucket in &self.buckets {
+            let lock = bucket.lock_map();
+            capacity += lock.capacity();
+            len += lock.len();
+            cached += bucket.cached.load(Ordering::Relaxed);
+        }
+        (capacity, len, cached)
+    }
+
     /// The 'cache_target' will only recalculated after this many inserts. Should be in the
     /// lower hundreds.
     pub fn config_target_cooldown(&self, target_cooldown: u32) -> &Self {
