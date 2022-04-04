@@ -368,8 +368,8 @@ where
         (capacity, len, cached)
     }
 
-    /// The 'cache_target' will only recalculated after this many inserts. Should be in the
-    /// lower hundreds.
+    /// The 'cache_target' will only recalculated after this many inserts in a bucket. Should
+    /// be in the lower hundreds. Defaults to `100`.
     pub fn config_target_cooldown(&self, target_cooldown: u32) -> &Self {
         for bucket in &self.buckets {
             bucket
@@ -379,9 +379,9 @@ where
         self
     }
 
-    /// Sets the lower limit for the 'cache_target' linear interpolation region.  Some
+    /// Sets the lower limit for the 'cache_target' linear interpolation region. Some
     /// hundreds to thousands of entries are recommended. Should be less than
-    /// 'max_capacity_limit'.
+    /// 'max_capacity_limit'. Defaults to `1000`.
     pub fn config_min_capacity_limit(&self, min_capacity_limit: usize) -> &Self {
         for bucket in &self.buckets {
             // divide by N so that each bucket gets its share
@@ -392,8 +392,9 @@ where
         self
     }
 
-    /// Sets the upper limit for the 'cache_target' linear interpolation region.
-    /// Should be fine around the maximum expected number of entries.
+    /// Sets the upper limit for the 'cache_target' linear interpolation region. The
+    /// recommended value should be around the maximum expected number of entries. Defaults to
+    /// `10000000`.
     pub fn config_max_capacity_limit(&self, max_capacity_limit: usize) -> &Self {
         for bucket in &self.buckets {
             // divide by N so that each bucket gets its share
@@ -409,6 +410,7 @@ where
     /// cached items for wasting less memory. Note that this counts against the 'capacity' of
     /// the underlying container, not the stored entries. Recommended values are around 5%,
     /// but may vary on the access patterns. Should be lower than 'max_cache_percent'
+    /// Defautls to `5%`.
     pub fn config_min_cache_percent(&self, min_cache_percent: u8) -> &Self {
         assert!(min_cache_percent <= 100);
         for bucket in &self.buckets {
@@ -422,7 +424,7 @@ where
     /// Sets the upper limit for the 'cache_target' in percent at 'min_capacity_limit'. When
     /// only few entries are stored in a CacheDb it is reasonable to use a lot space for
     /// caching. Note that this counts against the 'capacity' of the underlying container,
-    /// thus it should be not significantly over 60% at most.
+    /// thus it should be not significantly over 60% at most. Defaults to `60%`.
     pub fn config_max_cache_percent(&self, max_cache_percent: u8) -> &Self {
         assert!(max_cache_percent <= 100);
         for bucket in &self.buckets {
@@ -436,6 +438,7 @@ where
     /// Sets the number of entries removed at once when evicting entries from the cache. Since
     /// evicting branches into the code parts for removing the entries and calling their
     /// destructors it is a bit more cache friendly to batch a few such things together.
+    /// Defaults to `16`.
     pub fn config_evict_batch(&self, evict_batch: u8) -> &Self {
         for bucket in &self.buckets {
             bucket.evict_batch.store(evict_batch, Ordering::Relaxed);
