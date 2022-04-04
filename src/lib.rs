@@ -389,12 +389,12 @@ where
     }
 
     /// Sets the lower limit for the 'cache_target' in percent at 'max_capacity_limit'. Since
-    /// when very much entries are stored it is desireable to have a lower percentage of
+    /// when a high number of entries are stored it is desireable to have a lower percentage of
     /// cached items for wasting less memory. Note that this counts against the 'capacity' of
     /// the underlying container, not the stored entries. Recommended values are around 5%,
     /// but may vary on the access patterns. Should be lower than 'max_cache_percent'
     pub fn config_min_cache_percent(&self, min_cache_percent: u8) -> &Self {
-        assert!(min_cache_percent < 100);
+        assert!(min_cache_percent <= 100);
         for bucket in &self.buckets {
             bucket
                 .min_cache_percent
@@ -408,7 +408,7 @@ where
     /// caching. Note that this counts against the 'capacity' of the underlying container,
     /// thus it should be not significantly over 60% at most.
     pub fn config_max_cache_percent(&self, max_cache_percent: u8) -> &Self {
-        assert!(max_cache_percent < 100);
+        assert!(max_cache_percent <= 100);
         for bucket in &self.buckets {
             bucket
                 .max_cache_percent
