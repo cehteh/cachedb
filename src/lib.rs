@@ -530,10 +530,27 @@ mod test {
             })
             .try_init()
             .unwrap();
+        init_segv_handler();
     }
 
     #[cfg(not(feature = "logging"))]
-    fn init() {}
+    fn init() {
+        init_segv_handler();
+    }
+
+    fn init_segv_handler() {
+        use libc::*;
+        unsafe extern "C" fn handler(signum: c_int) {
+            let mut sigs = std::mem::MaybeUninit::uninit();
+            sigemptyset(sigs.as_mut_ptr());
+            sigaddset(sigs.as_mut_ptr(), signum);
+            sigprocmask(SIG_UNBLOCK, sigs.as_ptr(), std::ptr::null_mut());
+            panic!("SEGV!");
+        }
+        unsafe {
+            signal(SIGSEGV, handler as sighandler_t);
+        }
+    }
 
     // using the default hash based implementation for tests here
     impl Bucketize for String {}
