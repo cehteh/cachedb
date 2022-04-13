@@ -145,7 +145,7 @@ where
         let map_lock = bucket.lock_map();
 
         if let Some(entry) = map_lock.get(key) {
-            bucket.use_entry(entry);
+            bucket.use_entry(bucket.lock_lru(), entry);
             Ok((bucket, &**entry))
         } else {
             Err(Error::NoEntry)
@@ -170,7 +170,7 @@ where
         Ok(EntryReadGuard {
             bucket,
             entry: unsafe { &*entry_ptr },
-            guard: unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? },
+            guard: unsafe { Some(LockingMethod::read(&method, &(*entry_ptr).value)?) },
         })
     }
 
@@ -183,7 +183,7 @@ where
         Ok(EntryWriteGuard {
             bucket,
             entry: unsafe { &*entry_ptr },
-            guard: unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? },
+            guard: unsafe { Some(LockingMethod::write(&method, &(*entry_ptr).value)?) },
         })
     }
 
@@ -203,7 +203,6 @@ where
         let mut map_lock = bucket.lock_map();
 
         if let Some(entry) = map_lock.get(key) {
-            bucket.use_entry(entry);
             Ok((bucket, &**entry))
         } else {
             let entry = Box::pin(Entry::new(key.clone()));
@@ -228,13 +227,18 @@ where
                 }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
-                let mut wguard = unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value)? };
+                let mut wguard = unsafe {
+                    // Safety: Blocking can not fail
+                    LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
 
                 // but we have wguard here which allows us to constuct the inner guts
                 *wguard = Some(ctor(key)?);
+
+                bucket.enlist_entry(bucket.lock_lru(), unsafe { &*entry_ptr });
 
                 Ok(true)
             }
@@ -259,7 +263,7 @@ where
             Ok((bucket, entry_ptr)) => Ok(EntryReadGuard {
                 bucket,
                 entry: unsafe { &*entry_ptr },
-                guard: unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? },
+                guard: unsafe { Some(LockingMethod::read(&method, &(*entry_ptr).value)?) },
             }),
             Err((bucket, entry_ptr, mut map_lock)) => {
                 if self.lru_disabled.load(Ordering::Relaxed) == 0 {
@@ -267,8 +271,10 @@ where
                 }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
-                let mut wguard =
-                    unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap() };
+                let mut wguard = unsafe {
+                    // Safety: Blocking can not fail
+                    LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
@@ -280,7 +286,7 @@ where
                 Ok(EntryReadGuard {
                     bucket,
                     entry: unsafe { &*entry_ptr },
-                    guard: RwLockWriteGuard::downgrade(wguard),
+                    guard: Some(RwLockWriteGuard::downgrade(wguard)),
                 })
             }
         }
@@ -301,7 +307,7 @@ where
             Ok((bucket, entry_ptr)) => Ok(EntryWriteGuard {
                 bucket,
                 entry: unsafe { &*entry_ptr },
-                guard: unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? },
+                guard: unsafe { Some(LockingMethod::write(&method, &(*entry_ptr).value)?) },
             }),
             Err((bucket, entry_ptr, mut map_lock)) => {
                 if self.lru_disabled.load(Ordering::Relaxed) == 0 {
@@ -309,8 +315,10 @@ where
                 }
 
                 // need write lock for the ctor, before releasing the map to avoid a race.
-                let mut wguard =
-                    unsafe { LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap() };
+                let mut wguard = unsafe {
+                    // Safety: Blocking can not fail
+                    LockingMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                };
 
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
@@ -322,7 +330,7 @@ where
                 Ok(EntryWriteGuard {
                     bucket,
                     entry: unsafe { &*entry_ptr },
-                    guard: wguard,
+                    guard: Some(wguard),
                 })
             }
         }
@@ -344,15 +352,13 @@ where
         self
     }
 
-    /// Checks if the CacheDb has the given key stored. Note that this will have a race
-    /// condition when other threads access the CacheDb at the same time but may make sense
-    /// when lru_eviction is disabled and it can be ensure that no other thread inserts the
-    /// key.
+    /// Checks if the CacheDb has the given key stored. Note that this can be racy when other
+    /// threads access the CacheDb at the same time.
     pub fn contains_key(&self, key: &K) -> bool {
         self.buckets[key.bucket::<N>()].lock_map().contains(key)
     }
 
-    /// Get some basic stats about utilization.  Returns a tuple if `(capacity, len, cached)`
+    /// Get some basic stats about utilization.  Returns a tuple of `(capacity, len, cached)`
     /// summed from all buckets.  The result are approximate values because other threads may
     /// modify the underlying cache at the same time.
     pub fn stats(&self) -> (usize, usize, usize) {
@@ -502,7 +508,6 @@ mod test {
     use std::env;
     use std::sync::{Arc, Barrier};
     use std::{thread, time};
-    use std::sync::atomic::AtomicU64;
     #[cfg(feature = "logging")]
     use std::io::Write;
 
@@ -576,6 +581,85 @@ mod test {
     }
 
     #[test]
+    fn insert_is_caching() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        assert!(
+            cdb.insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+                .unwrap()
+        );
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 1);
+    }
+
+    #[test]
+    fn drop_is_caching() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        let entry = cdb
+            .get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+
+        drop(entry);
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 1);
+    }
+
+    #[test]
+    fn get_removes_from_cache() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        cdb.insert(&"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+
+        let entry = cdb.get(Blocking, &"foo".to_string()).unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+        assert_eq!(*entry, "bar".to_string());
+    }
+
+    #[test]
+    fn reget_removes_from_cache_again() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        let entry = cdb
+            .get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+        assert_eq!(*entry, "bar".to_string());
+
+        drop(entry);
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 1);
+
+        let entry = cdb.get(Blocking, &"foo".to_string()).unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+        assert_eq!(*entry, "bar".to_string());
+    }
+
+    #[test]
     fn insert_foobar_onebucket() {
         init();
         let cdb = CacheDb::<String, String, 1>::new();
@@ -612,6 +696,37 @@ mod test {
             *cdb.get(Blocking, &"bar2".to_string()).unwrap(),
             "foo2".to_string()
         );
+    }
+
+    #[test]
+    fn caching_works() {
+        init();
+        let cdb = CacheDb::<String, String, 1>::new();
+
+        let entry = cdb
+            .get_or_insert(Blocking, &"foo".to_string(), |_| Ok("bar".to_string()))
+            .unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+
+        let entry_again = cdb.get(Blocking, &"foo".to_string()).unwrap();
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+
+        drop(entry);
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 0);
+
+        drop(entry_again); // all references dropped, should be cached now
+
+        let (_capacity, len, cached) = cdb.stats();
+        assert_eq!(len, 1);
+        assert_eq!(cached, 1);
     }
 
     #[test]

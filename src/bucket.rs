@@ -77,20 +77,28 @@ where
         self.map.lock()
     }
 
-    pub(crate) fn use_entry(&self, entry: &Entry<K, V>) {
-        let mut lru_lock = self.lru_list.lock();
+    pub(crate) fn lock_lru(&self) -> MutexGuard<LinkedList<EntryAdapter<K, V>>> {
+        self.lru_list.lock()
+    }
+
+    pub(crate) fn use_entry(
+        &self,
+        mut lru_lock: MutexGuard<LinkedList<EntryAdapter<K, V>>>,
+        entry: &Entry<K, V>,
+    ) {
         if entry.lru_link.is_linked() {
             unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
             self.cached.fetch_sub(1, Ordering::Relaxed);
         }
-        entry.use_count.fetch_add(1, Ordering::Relaxed);
         entry.expire.store(false, Ordering::Relaxed);
     }
 
-    pub(crate) fn unuse_entry(&self, entry: &Entry<K, V>) {
-        let mut lru_lock = self.lru_list.lock();
-
-        if entry.use_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+    pub(crate) fn unuse_entry(
+        &self,
+        mut lru_lock: MutexGuard<LinkedList<EntryAdapter<K, V>>>,
+        entry: &Entry<K, V>,
+    ) {
+        if !entry.value.is_locked() && !entry.lru_link.is_linked() {
             self.cached.fetch_add(1, Ordering::Relaxed);
             if !entry.expire.load(Ordering::Relaxed) {
                 lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
@@ -98,6 +106,15 @@ where
                 lru_lock.push_front(unsafe { UnsafeRef::from_raw(entry) });
             }
         }
+    }
+
+    pub(crate) fn enlist_entry(
+        &self,
+        mut lru_lock: MutexGuard<LinkedList<EntryAdapter<K, V>>>,
+        entry: &Entry<K, V>,
+    ) {
+        self.cached.fetch_add(1, Ordering::Relaxed);
+        lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
     }
 
     /// recalculates the 'cache_target' and evicts entries from the LRU when above target

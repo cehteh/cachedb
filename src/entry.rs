@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use std::fmt::Debug;
 use std::marker::PhantomPinned;
@@ -24,13 +24,12 @@ pub trait KeyTraits: Eq + Clone + Bucketize + Debug {}
 /// like the LRU list node are stored here. Entries have stable addresses and can't be moved
 /// in memory.
 pub(crate) struct Entry<K, V> {
-    pub(crate) key:       K,
+    pub(crate) key:      K,
     // The Option is only used for delaying the construction with write lock held.
-    pub(crate) value:     RwLock<Option<V>>,
-    pub(crate) lru_link:  LinkedListLink, // protected by lru_list mutex
-    pub(crate) use_count: AtomicUsize,
-    pub(crate) expire:    AtomicBool,
-    _pin:                 PhantomPinned,
+    pub(crate) value:    RwLock<Option<V>>,
+    pub(crate) lru_link: LinkedListLink, // protected by lru_list mutex
+    pub(crate) expire:   AtomicBool,
+    _pin:                PhantomPinned,
 }
 
 intrusive_adapter!(pub(crate) EntryAdapter<K, V> = UnsafeRef<Entry<K, V>>: Entry<K, V> { lru_link: LinkedListLink });
@@ -41,7 +40,6 @@ impl<K: KeyTraits, V> Entry<K, V> {
             key,
             value: RwLock::new(None),
             lru_link: LinkedListLink::new(),
-            use_count: AtomicUsize::new(1),
             expire: AtomicBool::new(false),
             _pin: PhantomPinned,
         }
@@ -81,7 +79,7 @@ where
 {
     pub(crate) bucket: &'a Bucket<K, V>,
     pub(crate) entry:  &'a Entry<K, V>,
-    pub(crate) guard:  RwLockReadGuard<'a, Option<V>>,
+    pub(crate) guard:  Option<RwLockReadGuard<'a, Option<V>>>,
 }
 
 impl<'a, K, V, const N: usize> EntryReadGuard<'_, K, V, N>
@@ -101,7 +99,12 @@ where
     K: KeyTraits,
 {
     fn drop(&mut self) {
-        self.bucket.unuse_entry(self.entry);
+        let lru_lock = self.bucket.lock_lru();
+        unsafe {
+            debug_assert!(self.guard.is_some());
+            drop(self.guard.take().unwrap_unchecked());
+        }
+        self.bucket.unuse_entry(lru_lock, self.entry);
     }
 }
 
@@ -112,8 +115,13 @@ where
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        // unwrap is safe, the option is only None for a short time while constructing a new value
-        (*self.guard).as_ref().unwrap()
+        unsafe {
+            debug_assert!(self.guard.is_some());
+            let guard = self.guard.as_ref().unwrap_unchecked();
+
+            debug_assert!(guard.is_some());
+            guard.as_ref().unwrap_unchecked()
+        }
     }
 }
 
@@ -124,7 +132,7 @@ where
 {
     pub(crate) bucket: &'a Bucket<K, V>,
     pub(crate) entry:  &'a Entry<K, V>,
-    pub(crate) guard:  RwLockWriteGuard<'a, Option<V>>,
+    pub(crate) guard:  Option<RwLockWriteGuard<'a, Option<V>>>,
 }
 
 impl<'a, K, V, const N: usize> EntryWriteGuard<'_, K, V, N>
@@ -144,7 +152,12 @@ where
     K: KeyTraits,
 {
     fn drop(&mut self) {
-        self.bucket.unuse_entry(self.entry);
+        let lru_lock = self.bucket.lock_lru();
+        unsafe {
+            debug_assert!(self.guard.is_some());
+            drop(self.guard.take().unwrap_unchecked());
+        }
+        self.bucket.unuse_entry(lru_lock, self.entry);
     }
 }
 
@@ -155,8 +168,13 @@ where
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        // unwrap is safe, the option is only None for a short time while constructing a new value
-        (*self.guard).as_ref().unwrap()
+        unsafe {
+            debug_assert!(self.guard.is_some());
+            let guard = self.guard.as_ref().unwrap_unchecked();
+
+            debug_assert!(guard.is_some());
+            guard.as_ref().unwrap_unchecked()
+        }
     }
 }
 
@@ -165,7 +183,12 @@ where
     K: KeyTraits,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // unwrap is safe, the option is only None for a short time while constructing a new value
-        (*self.guard).as_mut().unwrap()
+        unsafe {
+            debug_assert!(self.guard.is_some());
+            let guard = self.guard.as_mut().unwrap_unchecked();
+
+            debug_assert!(guard.is_some());
+            guard.as_mut().unwrap_unchecked()
+        }
     }
 }
