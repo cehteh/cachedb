@@ -82,7 +82,7 @@ where
     pub(crate) guard:  Option<RwLockReadGuard<'a, Option<V>>>,
 }
 
-impl<'a, K, V, const N: usize> EntryReadGuard<'_, K, V, N>
+impl<K, V, const N: usize> EntryReadGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -94,7 +94,7 @@ where
     }
 }
 
-impl<'a, K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
+impl<K, V, const N: usize> Drop for EntryReadGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -108,7 +108,7 @@ where
     }
 }
 
-impl<'a, K, V, const N: usize> Deref for EntryReadGuard<'_, K, V, N>
+impl<K, V, const N: usize> Deref for EntryReadGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -135,7 +135,7 @@ where
     pub(crate) guard:  Option<RwLockWriteGuard<'a, Option<V>>>,
 }
 
-impl<'a, K, V, const N: usize> EntryWriteGuard<'_, K, V, N>
+impl<K, V, const N: usize> EntryWriteGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -147,7 +147,7 @@ where
     }
 }
 
-impl<'a, K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
+impl<K, V, const N: usize> Drop for EntryWriteGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -161,7 +161,7 @@ where
     }
 }
 
-impl<'a, K, V, const N: usize> Deref for EntryWriteGuard<'_, K, V, N>
+impl<K, V, const N: usize> Deref for EntryWriteGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {
@@ -178,7 +178,7 @@ where
     }
 }
 
-impl<'a, K, V, const N: usize> DerefMut for EntryWriteGuard<'_, K, V, N>
+impl<K, V, const N: usize> DerefMut for EntryWriteGuard<'_, K, V, N>
 where
     K: KeyTraits,
 {

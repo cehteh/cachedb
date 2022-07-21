@@ -105,7 +105,7 @@ where
         entry: &Entry<K, V>,
     ) {
         if entry.lru_link.is_linked() {
-            unsafe { lru_lock.cursor_mut_from_ptr(&*entry).remove() };
+            unsafe { lru_lock.cursor_mut_from_ptr(entry).remove() };
             self.cached.fetch_sub(1, Ordering::Relaxed);
         }
         entry.expire.store(false, Ordering::Relaxed);
