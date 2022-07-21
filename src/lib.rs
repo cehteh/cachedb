@@ -287,9 +287,6 @@ where
         }
     }
 
-    // TODO: The ctor function may become double nested Fn() -> Result(Fn() -> Result(Value)) The
-    //       outer can acquire resouces while the cachedb is (temporary) unlocked and returns the
-    //       real ctor then.
     /// Query an Entry for reading or construct it (atomically)
     pub fn get_or_insert<'a, M, F>(
         &'a self,
