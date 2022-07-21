@@ -1028,8 +1028,7 @@ mod test {
                             let mut rng = rand::thread_rng();
                             c.wait();
 
-                            let mut locked =
-                                HashMap::<u16, EntryReadGuard<u16, u16, BUCKETS>>::new();
+                            let mut locked = HashMap::<u16, EntryReadGuard<u16, u16, BUCKETS>>::new();
                             let mut maxlocked: u16 = 0;
 
                             for _ in 0..iterations {
@@ -1063,11 +1062,7 @@ mod test {
                                             if r > maxlocked {
                                                 maxlocked = r;
                                                 #[cfg(feature = "logging")]
-                                                trace!(
-                                                    "get_or_insert_mut {} and then wait/work for {:?}",
-                                                    r,
-                                                    w
-                                                );
+                                                trace!("get_or_insert_mut {} and then wait/work for {:?}", r, w);
                                                 let lock =
                                                     cdb.get_or_insert_mut(Duration::from_millis(500), &r, |_| Ok(!r));
                                                 #[cfg(feature = "logging")]
@@ -1084,11 +1079,7 @@ mod test {
                                             }
                                         } else if p < 60 {
                                             #[cfg(feature = "logging")]
-                                            trace!(
-                                                "wait/work for {:?} and then get_or_insert_mut {}",
-                                                w,
-                                                r
-                                            );
+                                            trace!("wait/work for {:?} and then get_or_insert_mut {}", w, r);
                                             if let Some(w) = w {
                                                 thread::sleep(w)
                                             }
@@ -1099,11 +1090,7 @@ mod test {
                                             drop(lock);
                                         } else if p < 80 {
                                             #[cfg(feature = "logging")]
-                                            trace!(
-                                                "get_or_insert {} and then wait/work for {:?}",
-                                                r,
-                                                w
-                                            );
+                                            trace!("get_or_insert {} and then wait/work for {:?}", r, w);
                                             let lock = cdb.get_or_insert(Blocking, &r, |_| Ok(!r)).unwrap();
                                             #[cfg(feature = "logging")]
                                             trace!("got {}", r);
@@ -1113,11 +1100,7 @@ mod test {
                                             drop(lock);
                                         } else {
                                             #[cfg(feature = "logging")]
-                                            trace!(
-                                                "wait/work for {:?} and then get_or_insert {}",
-                                                w,
-                                                r
-                                            );
+                                            trace!("wait/work for {:?} and then get_or_insert {}", w, r);
                                             if let Some(w) = w {
                                                 thread::sleep(w)
                                             }
