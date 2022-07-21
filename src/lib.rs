@@ -575,24 +575,29 @@ mod test {
 
     #[cfg(feature = "logging")]
     fn init() {
-        let counter: AtomicU64 = AtomicU64::new(0);
+        static LOGGER: std::sync::Once = std::sync::Once::new();
+
+        let counter = std::sync::atomic::AtomicU64::new(0);
         let seq_num = move || counter.fetch_add(1, Ordering::SeqCst);
 
-        env_logger::Builder::from_default_env()
-            .format(move |buf, record| {
-                writeln!(
-                    buf,
-                    "{:0>12}: {:>5}: {}:{}: {}: {}",
-                    seq_num(),
-                    record.level().as_str(),
-                    record.file().unwrap_or(""),
-                    record.line().unwrap_or(0),
-                    std::thread::current().name().unwrap_or("UNKNOWN"),
-                    record.args()
-                )
-            })
-            .try_init()
-            .unwrap();
+        LOGGER.call_once(|| {
+            env_logger::Builder::from_default_env()
+                .format(move |buf, record| {
+                    writeln!(
+                        buf,
+                        "{:0>12}: {:>5}: {}:{}: {}: {}",
+                        seq_num(),
+                        record.level().as_str(),
+                        record.file().unwrap_or(""),
+                        record.line().unwrap_or(0),
+                        std::thread::current().name().unwrap_or("UNKNOWN"),
+                        record.args()
+                    )
+                })
+                .try_init()
+                .unwrap();
+        });
+
         init_segv_handler();
     }
 
