@@ -91,6 +91,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashSet;
 use std::pin::Pin;
+use std::fmt::Debug;
+use std::fmt::Formatter;
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -114,13 +116,27 @@ pub use crate::locking_method::*;
 /// overhead.  Buckets by themself are not very expensive thus it is recommended to use a
 /// generous large enough number here.  Think about expected number of concurrenct accesses
 /// times four.
-#[derive(Debug)]
 pub struct CacheDb<K, V, const N: usize>
 where
     K: KeyTraits,
 {
     buckets:      [Bucket<K, V>; N],
     lru_disabled: AtomicU32,
+    // ctor:         Option<&'static dyn Fn(&K) -> DynResult<V> + Sync + Send>,
+    ctor:         Option<Box<dyn Fn(&K) -> DynResult<V> + Sync + Send>>,
+}
+
+impl<K, V, const N: usize> Debug for CacheDb<K, V, N>
+where
+    K: KeyTraits,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_struct("CacheDb")
+            .field("buckets", &self.buckets)
+            .field("lru_disabled", &self.lru_disabled)
+            .field("ctor", &self.ctor.is_some())
+            .finish()
+    }
 }
 
 impl<K, V, const N: usize> CacheDb<K, V, N>
@@ -132,6 +148,7 @@ where
         CacheDb {
             buckets:      [(); N].map(|()| Bucket::new()),
             lru_disabled: AtomicU32::new(0),
+            ctor:         None,
         }
     }
 
@@ -158,42 +175,52 @@ where
     ///   * Instant: tries to lock the entry until some point in time, returns 'Error::LockUnavailable'
     ///     when the lock can't be obtained in time.
     ///   All of the can be wraped in 'Recursive()' to allow a thread to relock any lock it already helds.
-    pub fn get<'a, M>(&'a self, method: M, key: &K) -> Result<EntryReadGuard<K, V, N>, Error>
+    pub fn get<'a, M>(&'a self, method: M, key: &K) -> DynResult<EntryReadGuard<K, V, N>>
     where
         M: 'a + LockingMethod<'a, V>,
     {
-        let (bucket, entry_ptr) = self.query_entry(key)?;
+        match &self.ctor {
+            Some(ctor) => self.get_or_insert(method, key, ctor),
+            None => {
+                let (bucket, entry_ptr) = self.query_entry(key)?;
 
-        let guard = unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? };
+                let guard = unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? };
 
-        if guard.is_some() {
-            Ok(EntryReadGuard {
-                bucket,
-                entry: unsafe { &*entry_ptr },
-                guard: Some(guard),
-            })
-        } else {
-            Err(Error::NoEntry)
+                if guard.is_some() {
+                    Ok(EntryReadGuard {
+                        bucket,
+                        entry: unsafe { &*entry_ptr },
+                        guard: Some(guard),
+                    })
+                } else {
+                    Err(Error::NoEntry.into())
+                }
+            }
         }
     }
 
     /// Query the Entry associated with key for writing
-    pub fn get_mut<'a, M>(&'a self, method: M, key: &K) -> Result<EntryWriteGuard<K, V, N>, Error>
+    pub fn get_mut<'a, M>(&'a self, method: M, key: &K) -> DynResult<EntryWriteGuard<K, V, N>>
     where
         M: 'a + LockingMethod<'a, V>,
     {
-        let (bucket, entry_ptr) = self.query_entry(key)?;
+        match &self.ctor {
+            Some(ctor) => self.get_or_insert_mut(method, key, ctor),
+            None => {
+                let (bucket, entry_ptr) = self.query_entry(key)?;
 
-        let guard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
+                let guard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
 
-        if guard.is_some() {
-            Ok(EntryWriteGuard {
-                bucket,
-                entry: unsafe { &*entry_ptr },
-                guard: Some(guard),
-            })
-        } else {
-            Err(Error::NoEntry)
+                if guard.is_some() {
+                    Ok(EntryWriteGuard {
+                        bucket,
+                        entry: unsafe { &*entry_ptr },
+                        guard: Some(guard),
+                    })
+                } else {
+                    Err(Error::NoEntry.into())
+                }
+            }
         }
     }
 
@@ -371,6 +398,13 @@ where
     /// threads access the CacheDb at the same time.
     pub fn contains_key(&self, key: &K) -> bool {
         self.buckets[key.bucket::<N>()].lock_map().contains(key)
+    }
+
+    /// Registers a default constructor to the cachedb. When present cachedb.get() and
+    /// cachedb.get_mut() will try to construct missing items.
+    pub fn with_ctor(mut self, ctor: Box<dyn Fn(&K) -> DynResult<V> + Sync + Send>) -> Self {
+        self.ctor = Some(ctor);
+        self
     }
 
     /// Get some basic stats about utilization.  Returns a tuple of `(capacity, len, cached)`
@@ -988,6 +1022,13 @@ mod test {
         assert_eq!(cached, 1000);
 
         assert_eq!(cdb.contains_key(&String::from("key_0")), false);
+    }
+
+    #[test]
+    fn registered_ctor() {
+        init();
+        let cdb = CacheDb::<String, (), 16>::new().with_ctor(Box::new(|_| Ok(())));
+        assert_eq!(*cdb.get(Blocking, &"foo".to_string()).unwrap(), ());
     }
 
     #[test]
