@@ -118,12 +118,12 @@ pub use crate::locking_method::*;
 /// times four.
 pub struct CacheDb<K, V, const N: usize>
 where
+    V: 'static,
     K: KeyTraits,
 {
     buckets:      [Bucket<K, V>; N],
     lru_disabled: AtomicU32,
-    // ctor:         Option<&'static dyn Fn(&K) -> DynResult<V> + Sync + Send>,
-    ctor:         Option<Box<dyn Fn(&K) -> DynResult<V> + Sync + Send>>,
+    ctor:         Option<&'static (dyn Fn(&K) -> DynResult<V> + Sync + Send)>,
 }
 
 impl<K, V, const N: usize> Debug for CacheDb<K, V, N>
@@ -402,7 +402,7 @@ where
 
     /// Registers a default constructor to the cachedb. When present cachedb.get() and
     /// cachedb.get_mut() will try to construct missing items.
-    pub fn with_ctor(mut self, ctor: Box<dyn Fn(&K) -> DynResult<V> + Sync + Send>) -> Self {
+    pub fn with_ctor(mut self, ctor: &'static (dyn Fn(&K) -> DynResult<V> + Sync + Send)) -> Self {
         self.ctor = Some(ctor);
         self
     }
@@ -1027,7 +1027,7 @@ mod test {
     #[test]
     fn registered_ctor() {
         init();
-        let cdb = CacheDb::<String, (), 16>::new().with_ctor(Box::new(|_| Ok(())));
+        let cdb = CacheDb::<String, (), 16>::new().with_ctor(&|_| Ok(()));
         assert_eq!(*cdb.get(Blocking, &"foo".to_string()).unwrap(), ());
     }
 
