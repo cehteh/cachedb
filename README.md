@@ -1,8 +1,7 @@
 In memory Key/Value store with LRU expire and concurrent access
 
 
-Description
-===========
+# Description
 
 Items are stored in N sharded/bucketized HashMaps to improve concurrency.  Every Item is
 always behind a RwLock.  Quering an item will return a guard associated to this lock.

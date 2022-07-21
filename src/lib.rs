@@ -1,19 +1,27 @@
 #![doc = include_str!("../README.md")]
-//! In memory Key/Value store with LRU expire and concurrent access
+//! # LRU List and expire configuration
+//!
+//! Items that are not in use are pushed onto the tail of an least-recently-used
+//! list. Whenever a CacheDb decides to expire Items these are taken from the head of the
+//! lru-list and dropped.
+//!
+//! There are some configuration options to tune the caching behavior. These configurations
+//! are all per-bucket and not global. Thus one has to take the number of buckets into account
+//! when configuring the cachedb. When exact accounting (for example for 'highwater') is
+//! needed one must use a single bucket cachedb.
+//!
+//! Its is also important to know that min/max capacity configurations account against the
+//! *capacity* of the underlying containers, not the used number of entries. This allows for
+//! better memory utilization after a container got resized but should be respected in a way
+//! that caching won't make the containers grow overly large.
+//!
+//! The default configuration is choosen to create an rather generic cache that may grow
+//! pretty huge and being conservative with expiring entries. By this it should be useable as
+//! is for many use cases. If required the `max_capacity_limit` or `highwater` are the first
+//! knobs to tune.
 //!
 //!
-//! Description
-//! ===========
-//!
-//! Items are stored in N sharded/bucketized HashMaps to improve concurrency.  Every Item is
-//! always behind a RwLock.  Quering an item will return a guard associated to this lock.
-//! Items that are not locked are kept in a list to implement a least-recent-used expire
-//! policy.  Locked items are removed from that lru list and put into the lru-list when they
-//! become unlocked.  Locked Items will not block the hosting HashMap.
-//!
-//!
-//! Implementation Discussion
-//! =========================
+//! # Implementation Discussion
 //!
 //! The HashMap storing the Items in Boxed entries.  Entries protect the actual item by a
 //! RwLock.  The API allows access to items only over these locks, returning wraped guards
@@ -26,15 +34,13 @@
 //! will acquire the newly constructed item.
 //!
 //!
-//! Proof that no lifetime guarantees are violated
-//! ----------------------------------------------
+//! ## Proof that no lifetime guarantees are violated
 //!
 //! Is actually simple, the returned guard has a rust lifetime bound to the CacheDB
 //! object.  Thus no access can outlive the hosting collection.
 //!
 //!
-//! Proof that no data races exist
-//! ------------------------------
+//! ## Proof that no data races exist
 //!
 //! In most parts the Mutex and RwLock ensures that no data races can happen, this is
 //! validated by rust.
@@ -53,8 +59,7 @@
 //! directly, not to the outer Box.
 //!
 //!
-//! Proof that locking is deadlock free
-//! -----------------------------------
+//! ## Proof that locking is deadlock free
 //!
 //! Locks acquired in the same order can never deadlock.  Deadlocks happen only when 2 or more
 //! threads wait on a resource while already holding resource another theread is trying to
@@ -70,16 +75,7 @@
 //! employ other tactics to counter deadlocks.
 //!
 //!
-//! LRU List and expire configuration
-//! =================================
-//!
-//! Items that are not in use are pushed onto the tail of an least-recently-used
-//! list. Whenever a CacheDb decides to expire Items these are taken from the head of the
-//! lru-list and dropped.
-//!
-//!
-//! TESTS
-//! =====
+//! # TESTS
 //!
 //! The 'test::multithreaded_stress' test can be controlled by environment variables
 //!
@@ -233,7 +229,7 @@ where
 
     /// Tries to insert an entry with the given constructor.  Returns Ok(true) when the
     /// constructor was called, Ok(false) when and item is already present under the given key
-    /// or some Err() in case the constructor failed.
+    /// or an Err() in case the constructor failed.
     pub fn insert<F>(&self, key: &K, ctor: F) -> DynResult<bool>
     where
         F: FnOnce(&K) -> DynResult<V>,
@@ -509,7 +505,7 @@ where
     }
 }
 
-/// Result type that boxes the error. Allows constructors to return arbitary errors.
+/// Result type that boxes the error. Allows constructors to return arbitrary errors.
 pub type DynResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The errors that CacheDb implements itself. Note that the constructors can return other
