@@ -113,8 +113,10 @@ where
         mut lru_lock: MutexGuard<LinkedList<EntryAdapter<K, V>>>,
         entry: &Entry<K, V>,
     ) {
-        self.cached.fetch_add(1, Ordering::Relaxed);
-        lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+        if !entry.lru_link.is_linked() {
+            self.cached.fetch_add(1, Ordering::Relaxed);
+            lru_lock.push_back(unsafe { UnsafeRef::from_raw(entry) });
+        }
     }
 
     /// recalculates the 'cache_target' and evicts entries from the LRU when above target

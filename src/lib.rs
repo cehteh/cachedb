@@ -167,11 +167,18 @@ where
         M: 'a + LockingMethod<'a, V>,
     {
         let (bucket, entry_ptr) = self.query_entry(key)?;
-        Ok(EntryReadGuard {
-            bucket,
-            entry: unsafe { &*entry_ptr },
-            guard: unsafe { Some(LockingMethod::read(&method, &(*entry_ptr).value)?) },
-        })
+
+        let guard = unsafe { LockingMethod::read(&method, &(*entry_ptr).value)? };
+
+        if guard.is_some() {
+            Ok(EntryReadGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: Some(guard),
+            })
+        } else {
+            Err(Error::NoEntry)
+        }
     }
 
     /// Query the Entry associated with key for writing
@@ -180,11 +187,18 @@ where
         M: 'a + LockingMethod<'a, V>,
     {
         let (bucket, entry_ptr) = self.query_entry(key)?;
-        Ok(EntryWriteGuard {
-            bucket,
-            entry: unsafe { &*entry_ptr },
-            guard: unsafe { Some(LockingMethod::write(&method, &(*entry_ptr).value)?) },
-        })
+
+        let guard = unsafe { LockingMethod::write(&method, &(*entry_ptr).value)? };
+
+        if guard.is_some() {
+            Ok(EntryWriteGuard {
+                bucket,
+                entry: unsafe { &*entry_ptr },
+                guard: Some(guard),
+            })
+        } else {
+            Err(Error::NoEntry)
+        }
     }
 
     // queries an entry and detaches it from the LRU or creates a new one
@@ -202,13 +216,18 @@ where
         let bucket = &self.buckets[key.bucket::<N>()];
         let mut map_lock = bucket.lock_map();
 
-        if let Some(entry) = map_lock.get(key) {
-            Ok((bucket, &**entry))
-        } else {
-            let entry = Box::pin(Entry::new(key.clone()));
-            let entry_ptr: *const Entry<K, V> = &*entry;
-            map_lock.insert(entry);
-            Err((bucket, entry_ptr, map_lock))
+        match map_lock.get(key) {
+            Some(entry) if entry.value.read().is_none() => {
+                let entry_ptr: *const Entry<K, V> = &**entry;
+                Err((bucket, entry_ptr, map_lock))
+            }
+            Some(entry) => Ok((bucket, &**entry)),
+            None => {
+                let entry = Box::pin(Entry::new(key.clone()));
+                let entry_ptr: *const Entry<K, V> = &*entry;
+                map_lock.insert(entry);
+                Err((bucket, entry_ptr, map_lock))
+            }
         }
     }
 
@@ -235,10 +254,10 @@ where
                 // release the map_lock, we dont need it anymore
                 drop(map_lock);
 
-                // but we have wguard here which allows us to constuct the inner guts
-                *wguard = Some(ctor(key)?);
-
+                // Put it into the lru list
                 bucket.enlist_entry(bucket.lock_lru(), unsafe { &*entry_ptr });
+                // but we have wguard here which allows us to construct the inner guts
+                *wguard = Some(ctor(key)?);
 
                 Ok(true)
             }
@@ -873,6 +892,50 @@ mod test {
             *cdb.get(Blocking, &"foo".to_string()).unwrap(),
             "baz".to_string()
         );
+    }
+
+    #[test]
+    fn failing_ctor() {
+        init();
+
+        #[derive(Debug)]
+        struct TestError(&'static str);
+        impl std::error::Error for TestError {}
+        impl std::fmt::Display for TestError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        fn failing_ctor(_key: &String) -> DynResult<String> {
+            Err(Box::new(TestError("nope")))
+        }
+
+        fn successing_ctor(_key: &String) -> DynResult<String> {
+            Ok("value".to_string())
+        }
+
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        assert!(cdb.insert(&"key".to_string(), failing_ctor).is_err());
+
+        // fail again
+        assert!(cdb.insert(&"key".to_string(), failing_ctor).is_err());
+
+        // get fails too
+        assert!(cdb.get(Blocking, &"key".to_string()).is_err());
+
+        // get_or_insert fails too
+        assert!(
+            cdb.get_or_insert(Blocking, &"key".to_string(), failing_ctor)
+                .is_err()
+        );
+
+        // succeeding ctor
+        assert!(cdb.insert(&"key".to_string(), successing_ctor).is_ok());
+
+        // get success
+        assert!(cdb.get(Blocking, &"key".to_string()).is_ok());
     }
 
     #[test]
