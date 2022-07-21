@@ -375,6 +375,13 @@ where
         }
     }
 
+    /// Removes an element from the cache. When the element is not in use it will become
+    /// dropped immediately. When it is in use then the expire bit gets set, thus it will be
+    /// evicted with priority.
+    pub fn remove(&self, key: &K) {
+        self.buckets[key.bucket::<N>()].remove(key);
+    }
+
     /// Disable the LRU eviction. Can be called multiple times, every call should be paired
     /// with a 'enable_lru()' call to reenable the LRU finally. Failing to do so may keep the
     /// CacheDb filling up forever. However this might be intentional to disable the LRU
@@ -1024,6 +1031,23 @@ mod test {
         assert_eq!(cached, 1000);
 
         assert_eq!(cdb.contains_key(&String::from("key_0")), false);
+    }
+
+    #[test]
+    fn remove() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        // insert one element
+        let _ = cdb.insert(&String::from("element"), |_| Ok(String::from("value")));
+
+        let (_capacity, _len, cached) = cdb.stats();
+        assert_eq!(cached, 1);
+
+        // remove it
+        cdb.remove(&String::from("element"));
+        let (_capacity, _len, cached) = cdb.stats();
+        assert_eq!(cached, 0);
     }
 
     #[test]

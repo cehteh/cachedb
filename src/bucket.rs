@@ -126,6 +126,20 @@ where
         }
     }
 
+    pub(crate) fn remove(&self, key: &K) {
+        let mut map_lock = self.lock_map();
+        if let Some(entry) = map_lock.get(key) {
+            let mut lru_lock = self.lock_lru();
+            if entry.lru_link.is_linked() {
+                unsafe { lru_lock.cursor_mut_from_ptr(&**entry).remove() };
+                map_lock.remove(key);
+                self.cached.fetch_sub(1, Ordering::Relaxed);
+            } else {
+                entry.expire.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub(crate) fn enlist_entry(
         &self,
         mut lru_lock: MutexGuard<LinkedList<EntryAdapter<K, V>>>,
