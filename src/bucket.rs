@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::fmt::{self, Debug, Formatter};
+use std::mem::ManuallyDrop;
 
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
@@ -32,8 +33,8 @@ pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
 {
-    map:      Mutex<HashSet<Pin<Box<Entry<K, V>>>>>,
-    lru_list: Mutex<LinkedList<EntryAdapter<K, V>>>,
+    map:      ManuallyDrop<Mutex<HashSet<Pin<Box<Entry<K, V>>>>>>,
+    lru_list: ManuallyDrop<Mutex<LinkedList<EntryAdapter<K, V>>>>,
 
     // Stats section
     pub(crate) cached: AtomicUsize,
@@ -53,14 +54,29 @@ where
     pub(crate) evict_batch: AtomicU8,
 }
 
+impl<K, V> Drop for Bucket<K, V>
+where
+    K: KeyTraits,
+{
+    fn drop(&mut self) {
+        // The lru_list contains a number of pointers into map, which it walks and turns into
+        // references in its Drop impl. Therefore, we must ensure that lru_list is dropped before
+        // the map or we have a use-after-free.
+        unsafe {
+            ManuallyDrop::drop(&mut self.lru_list);
+            ManuallyDrop::drop(&mut self.map);
+        }
+    }
+}
+
 impl<K, V> Bucket<K, V>
 where
     K: KeyTraits,
 {
     pub(crate) fn new() -> Self {
         Self {
-            map:                Mutex::new(HashSet::new()),
-            lru_list:           Mutex::new(LinkedList::new(EntryAdapter::new())),
+            map:                ManuallyDrop::new(Mutex::new(HashSet::new())),
+            lru_list:           ManuallyDrop::new(Mutex::new(LinkedList::new(EntryAdapter::new()))),
             cached:             AtomicUsize::new(0),
             cache_target:       AtomicU8::new(50),
             target_countdown:   AtomicU32::new(0),
