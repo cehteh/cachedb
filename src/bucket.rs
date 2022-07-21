@@ -46,6 +46,7 @@ where
     // Configuration
     pub(crate) target_cooldown: AtomicU32,
 
+    pub(crate) highwater:          AtomicUsize,
     pub(crate) max_capacity_limit: AtomicUsize,
     pub(crate) min_capacity_limit: AtomicUsize,
     pub(crate) max_cache_percent:  AtomicU8,
@@ -79,6 +80,7 @@ where
             lru_list:           ManuallyDrop::new(Mutex::new(LinkedList::new(EntryAdapter::new()))),
             cached:             AtomicUsize::new(0),
             cache_target:       AtomicU8::new(50),
+            highwater:          AtomicUsize::new(usize::MAX),
             target_countdown:   AtomicU32::new(0),
             target_cooldown:    AtomicU32::new(100),
             max_capacity_limit: AtomicUsize::new(10000000),
@@ -138,8 +140,6 @@ where
     /// recalculates the 'cache_target' and evicts entries from the LRU when above target
     pub(crate) fn maybe_evict(&self, map_lock: &mut MutexGuard<HashSet<Pin<Box<Entry<K, V>>>>>) {
         let min_capacity_limit = self.min_capacity_limit.load(Ordering::Relaxed);
-        let max_capacity_limit = self.max_capacity_limit.load(Ordering::Relaxed);
-        let max_cache_percent = self.max_cache_percent.load(Ordering::Relaxed);
         let min_cache_percent = self.min_cache_percent.load(Ordering::Relaxed);
         let capacity = map_lock.capacity();
 
@@ -150,6 +150,9 @@ where
             self.target_countdown
                 .store(countdown - 1, Ordering::Relaxed)
         } else {
+            let max_capacity_limit = self.max_capacity_limit.load(Ordering::Relaxed);
+            let max_cache_percent = self.max_cache_percent.load(Ordering::Relaxed);
+
             self.target_countdown.store(
                 self.target_cooldown.load(Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -175,8 +178,9 @@ where
             0
         };
 
-        if capacity > min_capacity_limit
-            && percent_cached > self.cache_target.load(Ordering::Relaxed)
+        if map_lock.len() > self.highwater.load(Ordering::Relaxed)
+            || (capacity > min_capacity_limit
+                && percent_cached > self.cache_target.load(Ordering::Relaxed))
         {
             // lets evict some entries
             self.evict(self.evict_batch.load(Ordering::Relaxed) as usize, map_lock);

@@ -393,6 +393,18 @@ where
         (capacity, len, cached)
     }
 
+    /// The 'highwater' limit, thats the maximum number of elements each bucket may hold.
+    /// When this is exceeded *unused* elements are evicted from the lru list.  Note that the
+    /// number of elements *in use* can still exceed this limit.  For performance reasons this
+    /// is per-bucket when exact accounting is needed use a one-shard cachedb.  Defaults to
+    /// 'usize::MAX', means no upper limit is set.
+    pub fn config_highwater(&self, highwater: usize) -> &Self {
+        for bucket in &self.buckets {
+            bucket.highwater.store(highwater, Ordering::Relaxed);
+        }
+        self
+    }
+
     /// The 'cache_target' will only recalculated after this many inserts in a bucket. Should
     /// be in the lower hundreds. Defaults to `100`.
     pub fn config_target_cooldown(&self, target_cooldown: u32) -> &Self {
@@ -936,6 +948,50 @@ mod test {
 
         // get success
         assert!(cdb.get(Blocking, &"key".to_string()).is_ok());
+    }
+
+    #[test]
+    fn exact_highwater() {
+        init();
+
+        // example about an cache limited at exact highwater level.
+
+        // only one bucket for precise accounting
+        let cdb = CacheDb::<String, String, 1>::new();
+
+        cdb
+        // no more than 1000 passive entries
+            .config_highwater(1000)
+        // check for limit on *every* insert and evict only one as well
+            .config_target_cooldown(1)
+            .config_evict_batch(1)
+        // set limits to allow 100% cache utilization.
+            .config_min_capacity_limit(1000)
+            .config_max_cache_percent(100)
+            .config_max_capacity_limit(1000)
+            .config_min_cache_percent(100);
+
+        // insert 1000 things should make them all cached
+        for n in 0..1000 {
+            let _ = cdb.insert(&format!("key_{}", n), |key| Ok(format!("value_of_{}", key)));
+        }
+
+        // They are still cached
+        for n in 0..1000 {
+            assert!(cdb.get(Blocking, &format!("key_{}", n)).is_ok());
+        }
+
+        let (_capacity, _len, cached) = cdb.stats();
+        assert_eq!(cached, 1000);
+
+        // adding one excess element will now drop the oldest
+        let _ = cdb.insert(&String::from("key_1001"), |_| {
+            Ok(String::from("1001'st element"))
+        });
+        let (_capacity, _len, cached) = cdb.stats();
+        assert_eq!(cached, 1000);
+
+        assert_eq!(cdb.contains_key(&String::from("key_0")), false);
     }
 
     #[test]
