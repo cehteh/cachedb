@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::borrow::Borrow;
 
 use intrusive_collections::{intrusive_adapter, LinkedListLink, UnsafeRef};
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_method::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::{bucket::Bucket, Bucketize};
 

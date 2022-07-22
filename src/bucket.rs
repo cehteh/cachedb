@@ -9,7 +9,7 @@ use std::mem::ManuallyDrop;
 use intrusive_collections::LinkedList;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
-use parking_lot::{Mutex, MutexGuard};
+use parking_method::{Mutex, MutexGuard};
 
 use crate::entry::EntryAdapter;
 use crate::Entry;
