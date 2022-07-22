@@ -18,6 +18,7 @@ use crate::{bucket::Bucket, Bucketize};
 #[cfg(not(feature = "logging"))]
 pub trait KeyTraits: Eq + Clone + Bucketize + 'static {}
 #[cfg(feature = "logging")]
+#[allow(missing_docs)]
 pub trait KeyTraits: Eq + Clone + Bucketize + Debug + 'static {}
 
 /// User data is stored behind RwLocks in an entry. Furthermore some management information

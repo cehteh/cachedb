@@ -1,4 +1,6 @@
 #![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+#![warn(rustdoc::missing_crate_level_docs)]
 //! # LRU List and expire configuration
 //!
 //! Items that are not in use are pushed onto the tail of an least-recently-used
