@@ -89,7 +89,7 @@ where
     /// Mark the entry for expiration. When dropped it will be put in front of the LRU list
     /// and by that evicted soon. Use with care, when many entries become pushed to the front,
     /// they eventually bubble up again.
-    fn expire(&mut self) {
+    pub fn expire(&mut self) {
         self.entry.expire.store(true, Ordering::Relaxed);
     }
 }
@@ -142,7 +142,7 @@ where
     /// Mark the entry for expiration. When dropped it will be put in front of the LRU list
     /// and by that evicted soon. Use with care, when many entries become pushed to the front,
     /// they eventually bubble up again.
-    fn expire(&mut self) {
+    pub fn expire(&mut self) {
         self.entry.expire.store(true, Ordering::Relaxed);
     }
 }
