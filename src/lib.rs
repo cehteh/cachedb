@@ -1069,6 +1069,24 @@ mod test {
     }
 
     #[test]
+    fn downgrade() {
+        init();
+        let cdb = CacheDb::<String, String, 16>::new();
+
+        let mut writeguard = cdb
+            .get_or_insert_mut(Blocking, &String::from("element"), |_| {
+                Ok(String::from("value"))
+            })
+            .unwrap();
+
+        *writeguard = String::from("newvalue");
+
+        let readguard = writeguard.downgrade();
+
+        assert_eq!(*readguard, "newvalue");
+    }
+
+    #[test]
     fn registered_ctor() {
         init();
         let cdb = CacheDb::<String, (), 16>::new().with_constructor(&|_| Ok(()));

@@ -135,7 +135,7 @@ where
     pub(crate) guard:  Option<RwLockWriteGuard<'a, Option<V>>>,
 }
 
-impl<K, V, const N: usize> EntryWriteGuard<'_, K, V, N>
+impl<'a, K, V, const N: usize> EntryWriteGuard<'a, K, V, N>
 where
     K: KeyTraits,
 {
@@ -144,6 +144,26 @@ where
     /// they eventually bubble up again.
     pub fn expire(&mut self) {
         self.entry.expire.store(true, Ordering::Relaxed);
+    }
+
+    /// Downgrade a write lock to a read lock without releasing it.
+    pub fn downgrade(mut self) -> EntryReadGuard<'a, K, V, N> {
+        debug_assert!(self.guard.is_some());
+
+        let bucket = self.bucket;
+        let entry = self.entry;
+        let guard = Some(RwLockWriteGuard::downgrade(unsafe {
+            self.guard.take().unwrap_unchecked()
+        }));
+
+        // We must not run the destructor of the gutted out write lock
+        std::mem::forget(self);
+
+        EntryReadGuard {
+            bucket,
+            entry,
+            guard,
+        }
     }
 }
 
