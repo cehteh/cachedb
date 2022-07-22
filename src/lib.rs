@@ -151,7 +151,7 @@ where
 
     /// queries an entry and detaches it from the LRU
     fn query_entry(&self, key: &K) -> Result<(&Bucket<K, V>, *const Entry<K, V>), Error> {
-        let bucket = &self.buckets[key.bucket::<N>()];
+        let bucket = &self.buckets[key.bucket_range::<N>()];
         let map_lock = bucket.lock_map();
 
         if let Some(entry) = map_lock.get(key) {
@@ -250,7 +250,7 @@ where
             MutexGuard<HashSet<Pin<Box<entry::Entry<K, V>>>>>,
         ),
     > {
-        let bucket = &self.buckets[key.bucket::<N>()];
+        let bucket = &self.buckets[key.bucket_range::<N>()];
         let mut map_lock = bucket.lock_map();
 
         match map_lock.get(key) {
@@ -407,7 +407,7 @@ where
     /// dropped immediately. When it is in use then the expire bit gets set, thus it will be
     /// evicted with priority.
     pub fn remove(&self, key: &K) {
-        self.buckets[key.bucket::<N>()].remove(key);
+        self.buckets[key.bucket_range::<N>()].remove(key);
     }
 
     /// Disable the LRU eviction. Can be called multiple times, every call should be paired
@@ -429,7 +429,9 @@ where
     /// Checks if the CacheDb has the given key stored. Note that this can be racy when other
     /// threads access the CacheDb at the same time.
     pub fn contains_key(&self, key: &K) -> bool {
-        self.buckets[key.bucket::<N>()].lock_map().contains(key)
+        self.buckets[key.bucket_range::<N>()]
+            .lock_map()
+            .contains(key)
     }
 
     /// Registers a default constructor to the cachedb. When present cachedb.get() and
@@ -661,10 +663,8 @@ mod test {
     // using the default hash based implementation for tests here
     impl Bucketize for String {}
     impl Bucketize for u16 {
-        fn bucket<const N: usize>(&self) -> usize {
-            let r = *self as usize % N;
-            #[cfg(feature = "logging")]
-            trace!("key {} falls into bucket {}", self, r);
+        fn bucket(&self) -> usize {
+            let r = *self as usize;
             r
         }
     }

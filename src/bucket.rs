@@ -259,10 +259,15 @@ where
 /// to implement this because very good distribution of the resulting value is not as
 /// important as for the hashmap.
 pub trait Bucketize: Hash {
-    // Must return an value 0..N-1 otherwise CacheDb will panic with array access out of bounds.
-    fn bucket<const N: usize>(&self) -> usize {
+    /// Must generate a trivial hash.
+    fn bucket(&self) -> usize {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
-        hasher.finish() as usize % N
+        hasher.finish() as usize
+    }
+
+    /// Must return an value 0..N-1
+    fn bucket_range<const N: usize>(&self) -> usize {
+        self.bucket() % N
     }
 }
