@@ -9,7 +9,7 @@ repository = "https://github.com/cehteh/cachedb.git"
 keywords = ["collection", "cache", "concurrency"]
 
 [dependencies]
-parking_method = "0.2.0"
+parking_method = "0.4.0"
 log = "0.4"
 intrusive-collections = "0.9"
 

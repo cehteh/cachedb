@@ -178,10 +178,12 @@ where
     ///     when the lock can't be obtained within this time.
     ///   * Instant: tries to lock the entry until some point in time, returns 'Error::LockUnavailable'
     ///     when the lock can't be obtained in time.
-    ///   All of the can be wraped in 'Recursive()' to allow a thread to relock any lock it already helds.
+    ///
+    /// For read locks the methods above can be wraped in 'Recursive()' to allow a thread to
+    /// relock any lock it already holds. Write/mutable locks do not support recursive locking.
     pub fn get<'a, M>(&'a self, method: M, key: &K) -> DynResult<EntryReadGuard<K, V, N>>
     where
-        M: 'a + RwLockMethod<'a, Option<V>>,
+        M: 'a + ReadLockMethod,
     {
         match &self.ctor {
             Some(ctor) => self.get_or_insert(method, key, ctor),
@@ -189,7 +191,8 @@ where
                 let (bucket, entry_ptr) = self.query_entry(key)?;
 
                 let guard = unsafe {
-                    RwLockMethod::read(&method, &(*entry_ptr).value)
+                    method
+                        .read(&(*entry_ptr).value)
                         .ok_or(Error::LockUnavailable)?
                 };
 
@@ -215,7 +218,7 @@ where
     /// For locking methods see `get()`.
     pub fn get_mut<'a, M>(&'a self, method: M, key: &K) -> DynResult<EntryWriteGuard<K, V, N>>
     where
-        M: 'a + RwLockMethod<'a, Option<V>>,
+        M: 'a + ReadLockMethod + WriteLockMethod,
     {
         match &self.ctor {
             Some(ctor) => self.get_or_insert_mut(method, key, ctor),
@@ -223,7 +226,8 @@ where
                 let (bucket, entry_ptr) = self.query_entry(key)?;
 
                 let guard = unsafe {
-                    RwLockMethod::write(&method, &(*entry_ptr).value)
+                    method
+                        .write(&(*entry_ptr).value)
                         .ok_or(Error::LockUnavailable)?
                 };
 
@@ -287,7 +291,7 @@ where
                 // need write lock for the ctor, before releasing the map to avoid a race.
                 let mut wguard = unsafe {
                     // Safety: Blocking can not fail
-                    RwLockMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                    Blocking.write(&(*entry_ptr).value).unwrap_unchecked()
                 };
 
                 // release the map_lock, we dont need it anymore
@@ -314,7 +318,7 @@ where
     ) -> DynResult<EntryReadGuard<K, V, N>>
     where
         F: FnOnce(&K) -> DynResult<V>,
-        M: 'a + RwLockMethod<'a, Option<V>>,
+        M: 'a + ReadLockMethod,
     {
         match self.query_or_insert_entry(key) {
             Ok((bucket, entry_ptr)) => Ok(EntryReadGuard {
@@ -322,7 +326,7 @@ where
                 entry: unsafe { &*entry_ptr },
                 guard: unsafe {
                     Some(
-                        RwLockMethod::read(&method, &(*entry_ptr).value)
+                        ReadLockMethod::read(&method, &(*entry_ptr).value)
                             .ok_or(Error::LockUnavailable)?,
                     )
                 },
@@ -335,7 +339,7 @@ where
                 // need write lock for the ctor, before releasing the map to avoid a race.
                 let mut wguard = unsafe {
                     // Safety: Blocking can not fail
-                    RwLockMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                    Blocking.write(&(*entry_ptr).value).unwrap_unchecked()
                 };
 
                 // release the map_lock, we dont need it anymore
@@ -365,7 +369,7 @@ where
     ) -> DynResult<EntryWriteGuard<K, V, N>>
     where
         F: FnOnce(&K) -> DynResult<V>,
-        M: 'a + RwLockMethod<'a, Option<V>>,
+        M: 'a + ReadLockMethod + WriteLockMethod,
     {
         match self.query_or_insert_entry(key) {
             Ok((bucket, entry_ptr)) => Ok(EntryWriteGuard {
@@ -373,7 +377,8 @@ where
                 entry: unsafe { &*entry_ptr },
                 guard: unsafe {
                     Some(
-                        RwLockMethod::write(&method, &(*entry_ptr).value)
+                        method
+                            .write(&(*entry_ptr).value)
                             .ok_or(Error::LockUnavailable)?,
                     )
                 },
@@ -386,7 +391,7 @@ where
                 // need write lock for the ctor, before releasing the map to avoid a race.
                 let mut wguard = unsafe {
                     // Safety: Blocking can not fail
-                    RwLockMethod::write(&Blocking, &(*entry_ptr).value).unwrap_unchecked()
+                    Blocking.write(&(*entry_ptr).value).unwrap_unchecked()
                 };
 
                 // release the map_lock, we dont need it anymore
