@@ -21,7 +21,7 @@ use crate::UnsafeRef;
 /// The LRU eviction is per bucket, this is most efficient and catches the corner cases where
 /// one bucket sees more entries than others.
 ///
-/// The eviction caclculation adapts itself based on the current capacity of the underlying
+/// The eviction calculation adapts itself based on the current capacity of the underlying
 /// hash map and some configuration variables. Every 'target_cooldown' inserts the
 /// 'cache_target' is recalcuated. As long the capacity is below 'min_capacity_limit' cache
 /// just fills up. Between 'min_capacity_limit' and 'max_capacity_limit' the 'cache_target' is

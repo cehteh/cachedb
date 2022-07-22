@@ -25,8 +25,8 @@
 //!
 //! The HashMap storing the Items in Boxed entries.  Entries protect the actual item by a
 //! RwLock.  The API allows access to items only over these locks, returning wraped guards
-//! thereof. Since cConcurrent access to the Entries will not block the Hashmap, some
-//! 'unsafe' code is required which is hidden behind an safe API.
+//! thereof. Since concurrent access to the Entries shall not block the Hashmap, some 'unsafe'
+//! code is required to implement hand over hand locking which is hidden behind an safe API.
 //!
 //! New Items are constructed in an atomic way by passing a closure producing the item to the
 //! respective lookup function.  While an Item is constructed it has a write lock which
@@ -49,10 +49,10 @@
 //! free the mutex on the HashMap.  This could lead to potential UB when the HashMap drops a
 //! value that is still in use/locked.  However this can never be happen because there is no
 //! way to drop Entries in a uncontrolled way.  The guard lifetimes are tied to the hosting
-//! hashmap the can not outlive it.  Dropping items from the hash map is normally only done
-//! from the LRU list which will never contain locked (and thus in-use) Entries. The
-//! 'remove(key)' member function checks explicitly that an Entry is not in use or delays the
-//! removal until all locks on the Item are released.
+//! hashmap the can not outlive it.  Dropping items from the hash map only done from the LRU
+//! list which will never contain locked (and thus in-use) Entries. The 'remove(key)' member
+//! function checks explicitly that an Entry is not in use or delays the removal until all
+//! locks on the Item are released.
 //!
 //! While the HashMap may reallocate the tables and thus move the Boxes containing the Entries
 //! around, this is not a problem since the lock guards contain references to Entries
@@ -165,8 +165,13 @@ where
         }
     }
 
-    /// Query the Entry associated with key for reading
-    /// the 'method' defines how entries are locked and can be one of:
+    /// Query the Entry associated with key for reading.  On success a EntryReadGuard
+    /// protecting the looked up value is returned.  When a default constructor is configured
+    /// (see `with_constructor()`) it tries to construct missing entries, with `get_or_insert()`.
+    /// When that fails the constructors error is returned. Otherwise
+    /// `Error::NoEntry` will be returned when the queried item is not in the cache.
+    ///
+    /// The 'method' defines how entries are locked and can be one of:
     ///   * Blocking: normal blocking lock, returns when the lock is acquired
     ///   * TryLock: tries to lock the entry, returns 'Error::LockUnavailable'
     ///     when the lock can't be obtained instantly.
@@ -199,7 +204,13 @@ where
         }
     }
 
-    /// Query the Entry associated with key for writing
+    /// Query the Entry associated with key for writing.  On success a EntryWriteGuard
+    /// protecting the looked up value is returned.  When a default constructor is configured
+    /// (see `with_constructor()`) it tries to construct missing entries with
+    /// `get_or_insert_mut()`. When that fails the constructors error is returned. Otherwise
+    /// `Error::NoEntry` will be returned when the queried item is not in the cache.
+    ///
+    /// For locking methods see `get()`.
     pub fn get_mut<'a, M>(&'a self, method: M, key: &K) -> DynResult<EntryWriteGuard<K, V, N>>
     where
         M: 'a + LockingMethod<'a, V>,
@@ -287,7 +298,9 @@ where
         }
     }
 
-    /// Query an Entry for reading or construct it (atomically)
+    /// Query an Entry for reading or construct it (atomically).
+    ///
+    /// For locking methods see `get()`.
     pub fn get_or_insert<'a, M, F>(
         &'a self,
         method: M,
@@ -331,7 +344,9 @@ where
         }
     }
 
-    /// Query an Entry for writing or construct it (atomically)
+    /// Query an Entry for writing or construct it (atomically).
+    ///
+    /// For locking methods see `get()`.
     pub fn get_or_insert_mut<'a, M, F>(
         &'a self,
         method: M,
@@ -406,7 +421,10 @@ where
 
     /// Registers a default constructor to the cachedb. When present cachedb.get() and
     /// cachedb.get_mut() will try to construct missing items.
-    pub fn with_ctor(mut self, ctor: &'static (dyn Fn(&K) -> DynResult<V> + Sync + Send)) -> Self {
+    pub fn with_constructor(
+        mut self,
+        ctor: &'static (dyn Fn(&K) -> DynResult<V> + Sync + Send),
+    ) -> Self {
         self.ctor = Some(ctor);
         self
     }
@@ -1053,7 +1071,7 @@ mod test {
     #[test]
     fn registered_ctor() {
         init();
-        let cdb = CacheDb::<String, (), 16>::new().with_ctor(&|_| Ok(()));
+        let cdb = CacheDb::<String, (), 16>::new().with_constructor(&|_| Ok(()));
         assert_eq!(*cdb.get(Blocking, &"foo".to_string()).unwrap(), ());
     }
 
