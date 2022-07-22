@@ -15,18 +15,20 @@ use crate::{bucket::Bucket, Bucketize};
 /// Collects the traits a Key must implement, any user defined Key type must implement this
 /// trait and any traits it derives from.
 /// The 'Debug' trait is only required when the feature 'logging' is enabled.
-#[cfg(not(feature = "logging"))]
-pub trait KeyTraits: Eq + Clone + Bucketize + 'static {}
 #[cfg(feature = "logging")]
-#[allow(missing_docs)]
 pub trait KeyTraits: Eq + Clone + Bucketize + Debug + 'static {}
+#[cfg(not(feature = "logging"))]
+#[allow(missing_docs)]
+pub trait KeyTraits: Eq + Clone + Bucketize + 'static {}
 
 /// User data is stored behind RwLocks in an entry. Furthermore some management information
 /// like the LRU list node are stored here. Entries have stable addresses and can't be moved
 /// in memory.
 pub(crate) struct Entry<K, V> {
     pub(crate) key:      K,
-    // The Option is only used for delaying the construction with write lock held.
+    // The Option is used for delaying the construction with write lock held as well when
+    // leaving stale objects behind when the ctor failed. Such stale objects will expire first
+    // and never be handed to the user.
     pub(crate) value:    RwLock<Option<V>>,
     pub(crate) lru_link: LinkedListLink, // protected by lru_list mutex
     pub(crate) expire:   AtomicBool,
