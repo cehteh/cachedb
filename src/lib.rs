@@ -99,7 +99,7 @@ use std::fmt::Formatter;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use intrusive_collections::UnsafeRef;
-use parking_method::*;
+pub use parking_method::*;
 
 mod entry;
 use crate::entry::Entry;
