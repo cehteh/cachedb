@@ -15,7 +15,7 @@ intrusive-collections = "0.9"
 
 [dev-dependencies]
 rand = "0.8.4"
-env_logger = "0.9"
+env_logger = "0.10"
 libc = "0.2.122"
 
 [features]
