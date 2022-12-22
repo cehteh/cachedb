@@ -33,6 +33,7 @@ pub(crate) struct Bucket<K, V>
 where
     K: KeyTraits,
 {
+    // TODO: use onsen    map:      ManuallyDrop<Mutex<HashSet<Slot<Entry<K, V>>>>>,  pool: Pool<>
     map:      ManuallyDrop<Mutex<HashSet<Pin<Box<Entry<K, V>>>>>>,
     lru_list: ManuallyDrop<Mutex<LinkedList<EntryAdapter<K, V>>>>,
 
